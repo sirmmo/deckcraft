@@ -199,7 +199,7 @@ fn element(e: &quick_xml::events::BytesStart) -> Node {
     let attrs = e
         .attributes()
         .filter_map(|a| a.ok())
-        .map(|a| (local(a.key.as_ref()), a.unescape_value().map(|v| v.to_string()).unwrap_or_default()))
+        .map(|a| (local(a.key.as_ref()), a.normalized_value(quick_xml::XmlVersion::Implicit1_0).map(|v| v.to_string()).unwrap_or_default()))
         .collect();
     Node { name: local(e.name().as_ref()), attrs, ..Default::default() }
 }

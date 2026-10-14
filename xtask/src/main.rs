@@ -4,6 +4,7 @@
 //! invoked through `std::process::Command`.
 
 mod assets;
+mod bench;
 mod ico;
 mod layers;
 mod parity;
@@ -25,6 +26,9 @@ commands:
                   <target>/office-js: wasm32 release build, `wasm-bindgen --target no-modules`,
                   and the bootstrap script (the desktop app and packaging pick it up from there)
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
+  bench [--save] [DECK...]
+                  time open, render, save and export of the sample (and DECKs) in release, and
+                  compare with docs/benchmarks/baseline.json (--save writes it)
   parity          recompute the PowerPoint feature-parity summary in docs/parity-checklist.md
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico (see packaging/icons.sh)
@@ -41,6 +45,7 @@ fn main() -> ExitCode {
         Some("office-js") => cmd_office_js(),
         Some("stats") => stats::run(&root(), rest.contains(&"--exact")),
         Some("parity") => parity::run(&root()),
+        Some("bench") => bench::run(&root(), &rest),
         Some("ico") => ico::run(&rest),
         Some("version") => version::run(&root(), &rest),
         Some("-h" | "--help" | "help") | None => {

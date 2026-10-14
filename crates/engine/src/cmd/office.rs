@@ -436,6 +436,7 @@ fn shape_type(sh: &Shape) -> &'static str {
         ShapeKind::Table(_) => "table",
         ShapeKind::Chart(_) => "chart",
         ShapeKind::Media(_) => "media",
+        ShapeKind::Model3d { .. } => "model3D",
         ShapeKind::Ink { .. } | ShapeKind::Opaque { .. } => "unsupported",
     }
 }
