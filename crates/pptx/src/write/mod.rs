@@ -732,7 +732,11 @@ pub fn export(p: &Presentation, kind: crate::PptxKind) -> Result<Vec<u8>, PptxEr
     }
     x.pkg.rels("ppt/presentation.xml", &pres.rels);
     for k in &kept {
-        if k.content_type.is_empty() {
+        if let Some(data) = &k.data {
+            if !k.content_type.is_empty() {
+                x.pkg.binary_override(&k.name, &k.content_type, data.to_vec());
+            }
+        } else if k.content_type.is_empty() {
             x.pkg.raw(&k.name, k.xml.clone().into_bytes());
         } else {
             x.pkg.xml_part(&k.name, &k.content_type, k.xml.clone().into_bytes());
@@ -748,6 +752,13 @@ pub fn export(p: &Presentation, kind: crate::PptxKind) -> Result<Vec<u8>, PptxEr
     root.add("extended-properties", "docProps/app.xml", false);
     for k in kept.iter().filter(|k| !k.rel_type.is_empty() && k.from_root) {
         root.add_new(&k.rel_type, &k.name, false);
+    }
+    // The presentation's own ribbon, unless the file kept a richer one (both would clash).
+    if let Some(r) = p.ribbon.as_ref().filter(|r| !r.is_empty() && !crate::custom_ui::has_kept(p))
+        && !x.pkg.has(crate::custom_ui::PART_CUSTOM_UI14)
+    {
+        x.pkg.xml_part(crate::custom_ui::PART_CUSTOM_UI14, "application/xml", crate::custom_ui::write(r).into_bytes());
+        root.add_new(crate::custom_ui::REL_CUSTOM_UI14, crate::custom_ui::PART_CUSTOM_UI14, false);
     }
     x.pkg.rels("", &root);
     x.pkg.finish()

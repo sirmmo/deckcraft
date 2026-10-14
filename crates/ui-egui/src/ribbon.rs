@@ -163,6 +163,10 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
         extra.push("Developer".into());
     }
     extra.extend(crate::addins::extra_tabs(&TABS));
+    // The presentation's own tabs (its ribbon buttons that run macros).
+    let shown: Vec<&str> = TABS.iter().copied().chain(extra.iter().map(String::as_str)).collect();
+    let deck_tabs = crate::addins::deck_tabs(app, &shown);
+    extra.extend(deck_tabs);
     if !TABS.contains(&app.ui.tab.as_str()) && !ctx_tabs.contains(&app.ui.tab.as_str()) && !extra.contains(&app.ui.tab) {
         app.ui.tab = "Home".into();
     }
@@ -260,6 +264,8 @@ pub fn show(app: &mut SlideApp, ui: &mut Ui) {
         }
         // The add-ins' groups: at the end of a built-in tab, or the whole of an add-in's own tab.
         crate::addins::ribbon_groups(app, ui, &tab);
+        // Then the presentation's own buttons.
+        crate::addins::deck_ribbon_groups(app, ui, &tab);
     });
 }
 

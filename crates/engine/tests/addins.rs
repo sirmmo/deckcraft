@@ -15,12 +15,14 @@ fn main() {
         serve();
         return;
     }
-    let tests: [(&str, fn()); 5] = [
+    let tests: [(&str, fn()); 7] = [
         ("commands_answer_engine_commands_as_one_step", commands_answer_engine_commands_as_one_step),
         ("macros_drive_the_presentation_as_one_undo_step", macros_drive_the_presentation_as_one_undo_step),
         ("a_failing_macro_changes_nothing", a_failing_macro_changes_nothing),
         ("macro_security_gates_running", macro_security_gates_running),
         ("modules_live_in_the_presentations_vba_project", modules_live_in_the_presentations_vba_project),
+        ("ribbon_buttons_run_their_macro_and_are_saved", ribbon_buttons_run_their_macro_and_are_saved),
+        ("recording_sends_the_steps_and_keeps_the_code", recording_sends_the_steps_and_keeps_the_code),
     ];
     for (name, t) in tests {
         t();
@@ -99,6 +101,18 @@ fn serve() {
                     .map(|b| String::from_utf8(deckcraft_engine::cmd::base64_decode(b).unwrap()).unwrap())
                     .unwrap_or_default();
                 json!({"result": {"modules": if text.is_empty() { json!([]) } else { json!([{"name": "Module1", "kind": "standard", "source": text}]) }}})
+            }
+            // The recorder: one comment line per step, under the name asked for.
+            Some("macros/record") => {
+                let steps = p["steps"].as_array().cloned().unwrap_or_default();
+                let lines: Vec<String> = steps
+                    .iter()
+                    .map(|st| {
+                        format!("' {} {}", st["command"].as_str().unwrap_or("?"), if st.get("params").is_some() { "with params" } else { "bare" })
+                    })
+                    .collect();
+                let name = p["name"].as_str().unwrap_or("Macro1");
+                json!({"result": {"source": format!("Sub {name}()\r\n{}\r\nEnd Sub\r\n", lines.join("\r\n"))}})
             }
             Some("macros/saveModule") => {
                 let b64 = deckcraft_engine::cmd::base64_encode(p["source"].as_str().unwrap_or("").as_bytes());
@@ -207,4 +221,86 @@ fn modules_live_in_the_presentations_vba_project() {
     s.execute("edit.undo", &json!({})).unwrap();
     assert!(s.active().unwrap().doc.vba_project.is_none());
     assert!(deckcraft_engine::plugin::unload(PLUGIN));
+}
+
+fn ribbon_buttons_run_their_macro_and_are_saved() {
+    let mut s = session();
+    assert_eq!(s.execute("developer.ribbon", &json!({})).unwrap(), json!({"tabs": [], "editable": true}));
+    let id =
+        s.execute("developer.addRibbonButton", &json!({"macro": "Module1.Stamp", "label": "Go", "tab": "review", "tag": "north"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    s.execute("developer.addRibbonButton", &json!({"macro": "Module1.Fill", "large": false})).unwrap();
+    let r = s.execute("developer.ribbon", &json!({})).unwrap();
+    assert_eq!((r["tabs"][0]["tab"].as_str(), r["tabs"][0]["builtin"].as_str()), (Some("Review"), Some("TabReview")), "{r}");
+    assert_eq!(r["tabs"][0]["groups"][0]["buttons"][0]["label"], "Go");
+    assert_eq!(r["tabs"][1]["tab"], "Macros", "a tab of its own by default");
+    assert_eq!(r["tabs"][1]["groups"][0]["buttons"][0]["label"], "Fill", "labelled after the macro");
+
+    // Pressing it runs the macro with the button, under Macro Security like any macro.
+    assert!(s.execute("developer.pressRibbonButton", &json!({"id": id})).unwrap_err().to_string().contains("disabled"));
+    s.execute("developer.enableMacros", &json!({})).unwrap();
+    let shapes = s.active().unwrap().doc.slides[0].shapes.len();
+    s.execute("developer.pressRibbonButton", &json!({"id": id})).unwrap();
+    let first = &s.active().unwrap().doc.slides[0];
+    assert_eq!(first.shapes.len(), shapes + 1);
+    assert!(first.shapes.last().unwrap().text.as_ref().unwrap().text().ends_with("north"), "the macro got the button's tag");
+    assert!(s.execute("developer.pressRibbonButton", &json!({"id": "nope"})).is_err());
+
+    // Saved with the presentation as the Office ribbon part, and read back.
+    let doc = s.active().unwrap().doc.clone();
+    let bytes = deckcraft_pptx::export_as(&doc, deckcraft_pptx::PptxKind::MacroPresentation).unwrap();
+    assert_eq!(deckcraft_pptx::import(&bytes).unwrap().ribbon, doc.ribbon);
+
+    // Edits and removals are undoable; the last button gone, the presentation has no ribbon.
+    let label = |s: &Session| s.active().unwrap().doc.ribbon.as_ref().unwrap().button(&id).unwrap().label.clone();
+    s.execute("developer.editRibbonButton", &json!({"id": id, "label": "Run it", "image": "HappyFace"})).unwrap();
+    assert_eq!(label(&s), "Run it");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(label(&s), "Go");
+    assert!(s.execute("developer.editRibbonButton", &json!({"id": id, "image": "<img>"})).is_err());
+    assert!(s.execute("developer.addRibbonButton", &json!({"macro": "x\"/><evil"})).is_err());
+    let all: Vec<String> =
+        s.active().unwrap().doc.ribbon.as_ref().unwrap().ids().map(str::to_string).filter(|i| i.starts_with("craftButton")).collect();
+    for b in &all {
+        s.execute("developer.removeRibbonButton", &json!({"id": b})).unwrap();
+    }
+    assert!(s.active().unwrap().doc.ribbon.is_none());
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(s.active().unwrap().doc.ribbon.as_ref().is_some_and(|r| r.button(&all[all.len() - 1]).is_some()));
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
+}
+
+fn recording_sends_the_steps_and_keeps_the_code() {
+    let mut s = session();
+    assert_eq!(s.execute("developer.recordMacro", &json!({"stop": true})).unwrap(), json!({"recording": false}), "nothing to stop");
+    assert_eq!(s.execute("developer.recordMacro", &json!({})).unwrap()["recording"], true);
+    assert!(s.recording.is_some());
+    s.execute("slide.new", &json!({"layout": "blank"})).unwrap();
+    s.execute("developer.macros", &json!({})).unwrap();
+    s.execute("shape.insert", &json!({"preset": "star5", "rect": [10, 10, 100, 100]})).unwrap();
+    // Stopping (no `stop`: the same button toggles) sends the steps and appends the code to Module1.
+    let r = s.execute("developer.recordMacro", &json!({"name": "Recorded"})).unwrap();
+    assert_eq!(r["recording"], false);
+    assert_eq!(r["steps"], 2, "the Developer tab's own commands aren't recorded: {r}");
+    assert_eq!(r["module"], "Module1");
+    let source = r["source"].as_str().unwrap();
+    assert!(source.starts_with("Sub Recorded()") && source.contains("' slide.new with params") && source.contains("' shape.insert"), "{source}");
+    let module = s.execute("developer.modules", &json!({})).unwrap()["modules"][0]["source"].as_str().unwrap().to_string();
+    assert!(module.contains("Sub Recorded()"), "{module}");
+    assert!(s.recording.is_none());
+    // A second recording goes after the first.
+    s.execute("developer.recordMacro", &json!({})).unwrap();
+    s.execute("developer.recordMacro", &json!({"stop": true, "name": "Again"})).unwrap();
+    let module = s.execute("developer.modules", &json!({})).unwrap()["modules"][0]["source"].as_str().unwrap().to_string();
+    assert!(module.find("Sub Recorded()").unwrap() < module.find("Sub Again()").unwrap(), "{module}");
+    // Steps given directly; hostile names are refused.
+    let code = s.execute("developer.recordToCode", &json!({"steps": [{"command": "slide.new", "params": null}], "name": "Direct"})).unwrap();
+    assert!(code["source"].as_str().unwrap().starts_with("Sub Direct()"));
+    assert!(s.execute("developer.recordToCode", &json!({"steps": [], "name": "1 bad"})).is_err());
+    assert!(s.execute("developer.recordToCode", &json!({})).is_err());
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
+    assert!(s.execute("developer.recordMacro", &json!({})).is_err(), "no add-in, no recording");
+    assert!(s.recording.is_none());
 }

@@ -15,12 +15,15 @@ pub mod defaults;
 pub mod edit;
 pub mod numfmt;
 pub mod resolve;
+pub mod ribbon;
 pub mod style;
 pub mod table;
 pub mod text;
 pub mod theme;
 mod trendline;
 pub mod words;
+
+pub use ribbon::{Ribbon, RibbonButton, RibbonGroup, RibbonTab};
 
 use std::sync::Arc;
 
@@ -957,6 +960,9 @@ pub struct KeptPart {
     /// Content type; empty for a relationships part.
     pub content_type: String,
     pub xml: String,
+    /// Bytes of a binary part (a ribbon's own pictures), written instead of `xml`. base64 in JSON.
+    #[serde(with = "b64::opt_arc", skip_serializing_if = "Option::is_none")]
+    pub data: Option<Arc<Vec<u8>>>,
     /// Full relationship type linking it, empty when only its sibling parts point at it.
     pub rel_type: String,
     /// Linked from the package root rather than from the presentation part.
@@ -1014,6 +1020,10 @@ pub struct Presentation {
     /// The parts the VBA project relates to (its signatures, VBA data…), byte for byte.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vba_parts: Vec<VbaPart>,
+    /// The presentation's own ribbon tabs, groups and macro buttons (`customUI14.xml`). `None` =
+    /// none, or a richer customisation kept unchanged in [`Self::kept_parts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ribbon: Option<Ribbon>,
 }
 
 /// A part a VBA project relates to (`vbaProjectSignature.bin`, `vbaData.xml`…), kept verbatim.

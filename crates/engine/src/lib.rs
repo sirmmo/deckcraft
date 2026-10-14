@@ -476,6 +476,9 @@ pub struct Session {
     active: Option<usize>,
     pub prefs: Prefs,
     pub journal: Vec<(String, Value)>,
+    /// Developer › Record Macro: the journal position where recording started (a DeckCraft
+    /// extra; PowerPoint has no macro recorder).
+    pub recording: Option<usize>,
     pub clipboard: Clipboard,
     pub ui_requests: Vec<UiRequest>,
     pub tool: tools::ToolState,
@@ -520,6 +523,7 @@ impl Session {
             active: None,
             prefs: Prefs::default(),
             journal: vec![],
+            recording: None,
             clipboard: Clipboard::default(),
             ui_requests: vec![],
             tool: tools::ToolState::default(),
@@ -622,6 +626,10 @@ impl Session {
         }
         let before = self.active().map(|d| (d.uid, d.doc.clone(), d.selection.clone()));
         let outer = self.depth == 0;
+        // Delete while editing text deletes forward in the text: journaled (and recorded as a
+        // macro) as the text delete it is, not as a shape delete.
+        let forward_text_delete =
+            id == "edit.delete" && params.get("ids").is_none_or(Value::is_null) && self.active().is_some_and(|d| d.selection.text.is_some());
         self.depth += 1;
         let r = (spec.run)(self, params);
         self.depth -= 1;
@@ -655,9 +663,15 @@ impl Session {
             push_undo(st, HistoryEntry { label: spec.label.to_string(), doc: old, selection: sel });
         }
         if spec.journal && outer {
-            self.journal.push((id.to_string(), params.clone()));
+            if forward_text_delete {
+                self.journal.push(("text.delete".to_string(), serde_json::json!({"dir": "forward"})));
+            } else {
+                self.journal.push((id.to_string(), params.clone()));
+            }
             if self.journal.len() > 10_000 {
                 self.journal.drain(..1000);
+                // A recording keeps its place in the shortened journal.
+                self.recording = self.recording.map(|r| r.saturating_sub(1000));
             }
         }
         Ok(r)

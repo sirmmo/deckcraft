@@ -1,6 +1,6 @@
 # File-format parity with PowerPoint
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** major (Macro-enabled `.pptm` / `.potm` / `.ppsm` open and save, keeping the VBA project and its signatures byte for byte; `.potx` / `.ppsx` written with their own content types; previously major: community PR wave 2026-10-14: seven owned PPTX corpus files, embedded fonts, EMF/WMF clip regions, threaded comments (#70), chart trendlines and workbooks (#335), SmartArt written as a diagram, tags and custom XML kept, picture export DPI; duplicated rows and headers folded; previous: trivial, lines in scaled groups, #233) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-15 · **Change:** minor (the ribbon customisation part `customUI14.xml` / `customUI.xml` is read and written when it is tabs, groups and macro buttons, and kept with its pictures otherwise; previously major: Macro-enabled `.pptm` / `.potm` / `.ppsm` open and save, keeping the VBA project and its signatures byte for byte; `.potx` / `.ppsx` written with their own content types; previously major: community PR wave 2026-10-14: seven owned PPTX corpus files, embedded fonts, EMF/WMF clip regions, threaded comments (#70), chart trendlines and workbooks (#335), SmartArt written as a diagram, tags and custom XML kept, picture export DPI; duplicated rows and headers folded; previous: trivial, lines in scaled groups, #233) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every format PowerPoint reads or writes, DeckCraft's support, fidelity and how it is tested.
 Gaps are itemized in [gaps.md](gaps.md#file-formats). Dimension score: **~58% ready**
@@ -90,6 +90,7 @@ the round trip even though DeckCraft doesn't model it.
 | Embedded fonts | yes | yes | MicroType Express subsets kept, not drawn |
 | Tags (`p:custDataLst`) on the presentation, slides and shapes | yes | yes | Add-ins such as think-cell keep their identity; `tags_survive_round_trip` |
 | Custom XML data, sensitivity label (`docMetadata/LabelInfo.xml`), custom document properties | kept verbatim | yes | SharePoint metadata and the label survive a save; `custom_xml_label_and_custom_properties_survive_save` |
+| Ribbon customisation (`customUI/customUI14.xml`, Office 2007 `customUI.xml`) | yes | yes | Modelled (`Presentation::ribbon`) when it is tabs, groups and macro buttons: edited in Developer › Ribbon Buttons and written back as `customUI14.xml` from the package root, in every kind (PowerPoint shows them too). A richer ribbon (menus, callbacks, pictures of its own) is kept verbatim with its pictures; its buttons show and run, read-only. Never written twice (`crates/pptx/tests/ribbon.rs`, 3 tests) |
 | VBA | no | no | |
 | Encryption (password to open) | no | no | |
 
@@ -107,6 +108,7 @@ the round trip even though DeckCraft doesn't model it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | The ribbon customisation part (`customUI14.xml` / `customUI.xml`) is read and written when it is tabs, groups and macro buttons; a richer one is kept with its pictures |
 | 2026-10-14 | minor | `.pptm` / `.potm` / `.ppsm` read and written with the VBA project (and its signature/data parts) carried byte for byte; macro-free kinds drop it cleanly; a deck with macros saved as `.pptx`/`.potx`/`.ppsx` becomes `.pptm`/`.potm`/`.ppsm`; `.potx` and `.ppsx` now get their own content types |
 | 2026-10-12 | minor | SmartArt import lays each shape's text out on its `dsp:txXfrm` text rectangle instead of the shape box |
 | 2026-10-13 | minor | EMF/WMF rectangle clip regions limit later drawing; EMF+ records remain |

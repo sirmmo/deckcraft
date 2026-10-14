@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** major (add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-15 · **Change:** minor (ribbon buttons that run macros, saved as `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -340,10 +340,12 @@ Detail in [localization-parity.md](localization-parity.md).
 - **Add-ins: first version.** Out-of-process add-ins (the craft apps' shared `plugin.json`
   manifest and protocol, installed from GitHub), Office add-ins' task panes on PowerPoint's
   JavaScript API (PowerPointApi 1.1–1.4 subset, DeckCraft's own Office.js; macOS and Windows), and
-  VBA macros through a macro add-in (craft-vba) with the Developer tab. The owner reversed the
-  earlier "out of scope" policy on 2026-10-14 ([plugins.md](plugins.md)). Missing: Office.js
-  events, dialogs, tags and `insertSlidesFromBase64`; a Linux web view; a ribbon-buttons editor and
-  `customUI` in packages; VBA's UserForms, events and partial-text formatting. 15–30 h.
+  VBA macros through a macro add-in (craft-vba) with the Developer tab: ribbon buttons that run
+  macros (Developer › Ribbon Buttons, saved as the package's `customUI14.xml` so PowerPoint shows
+  them too) and Record Macro (a DeckCraft extra: PowerPoint has no recorder). The owner reversed
+  the earlier "out of scope" policy on 2026-10-14 ([plugins.md](plugins.md)). Missing: Office.js
+  events, dialogs, tags and `insertSlidesFromBase64`; a Linux web view; editing a ribbon richer
+  than tabs, groups and buttons; VBA's UserForms, events and partial-text formatting. 12–25 h.
 - **Six original starter decks; PowerPoint's large template gallery remains.** File › New and the
   start screen offer Briefing, Lesson, Pitch, Field Notes, Quarterly and Evening Talk
   (`file.new {template}`), each a few slides on one of our themes. Dozens of further offline
@@ -361,6 +363,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Ribbon buttons that run macros (`customUI14.xml` read and written) and Record Macro: the ribbon-buttons and `customUI` gap closed |
 | 2026-10-14 | minor | Add-ins, Office add-ins and VBA macros through an add-in (the owner reversed "out of scope"); `.pptm`/`.potm`/`.ppsm` and template/show content types: that gap narrowed to opening behaviour |
 | 2026-10-13 | minor | EMF/WMF rectangle clip regions (`INTERSECTCLIPRECT`, `EXCLUDECLIPRECT`, `EXTSELECTCLIPRGN`) limit later drawing. EMF+ records remain |
 | 2026-10-13 | minor | Embedded fonts are read, written and drawn (TrueType, OpenType, Embedded OpenType). The gap is now MicroType Express subsets, which are kept but not drawn |

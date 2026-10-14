@@ -834,6 +834,7 @@ fn preset_of(kind: &str) -> R<String> {
         "rectangle" => "rect",
         "roundRectangle" => "roundRect",
         "lineInverse" => "lineInv",
+        "rightTriangle" => "rtTriangle",
         other => other,
     };
     if deckcraft_geom::preset::info(p).is_none() {

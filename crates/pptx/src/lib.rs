@@ -9,6 +9,7 @@
 
 mod cfb;
 mod custgeom;
+pub mod custom_ui;
 mod dgm;
 mod maps;
 mod opc;

@@ -4,10 +4,18 @@
 //! edit, create), Macro Security, and the "macros disabled" bar with Enable Content. Everything
 //! goes through the `plugins.*` and `developer.*` commands; the add-ins own their behaviour,
 //! DeckCraft the interface.
+//!
+//! Record Macro / Stop Recording (a DeckCraft extra: PowerPoint has no macro recorder) records
+//! what you do and puts it in Module1 as the add-in's code. The presentation's own ribbon buttons
+//! (Developer › Ribbon Buttons, `developer.*RibbonButton`) run its macros: they show on the tab
+//! they name, a built-in one or their own, whether or not a macro add-in is loaded (without one, a
+//! click says to install one), and are saved with the presentation so PowerPoint shows them too.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use deckcraft_engine::plugin::{self, ButtonSize, MenuKind};
+use deckcraft_model::RibbonGroup;
 use egui::{RichText, Ui, vec2};
 use serde_json::{Value as Json, json};
 
@@ -24,8 +32,27 @@ pub struct State {
     pub macros: Option<MacrosWindow>,
     pub editor: Option<Editor>,
     pub security: bool,
+    pub buttons: Option<ButtonsWindow>,
+    /// The presentation's ribbon as last read: (presentation uid, model pointer, tabs, editable).
+    deck: Option<(u64, usize, DeckTabs, bool)>,
     /// Presentations whose "macros disabled" bar was dismissed or acted on.
     notice_done: HashSet<u64>,
+}
+
+/// The presentation's ribbon by DeckCraft tab name: (tab, groups).
+type DeckTabs = Rc<Vec<(String, Vec<RibbonGroup>)>>;
+
+/// Developer › Ribbon Buttons: the presentation's buttons, and the form adding one.
+#[derive(Default)]
+pub struct ButtonsWindow {
+    pub macros: Vec<String>,
+    pub macro_name: String,
+    pub label: String,
+    pub tab: String,
+    pub group: String,
+    pub image: String,
+    pub small: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Default)]
@@ -244,14 +271,255 @@ pub fn developer_ribbon(app: &mut SlideApp, ui: &mut Ui) {
         if named(big_button(ui, Icon::Macros, "Macros", true), "Macros").on_hover_text("Run, edit or create a macro").clicked() {
             open_macros(app);
         }
-        if named(small_button(ui, Icon::Lock, "Macro Security", true, false), "Macro Security")
-            .on_hover_text("Which presentations' macros may run")
+        ui.vertical(|ui| {
+            let recording = app.session.recording.is_some();
+            let (icon, label) = if recording { (Icon::Stop, "Stop Recording") } else { (Icon::Record, "Record Macro") };
+            if named(small_button(ui, icon, label, true, recording), label)
+                .on_hover_text("Records what you do as a macro at the end of Module1 (PowerPoint has no macro recorder: this is DeckCraft's)")
+                .clicked()
+            {
+                toggle_recording(app);
+            }
+            if named(small_button(ui, Icon::Lock, "Macro Security", true, false), "Macro Security")
+                .on_hover_text("Which presentations' macros may run")
+                .clicked()
+            {
+                app.addins.security = true;
+            }
+        });
+        if named(big_button(ui, Icon::Plus, "Ribbon\nButtons", true), "Ribbon Buttons")
+            .on_hover_text("Buttons on the ribbon that run this presentation's macros")
             .clicked()
         {
-            app.addins.security = true;
+            open_buttons(app, None);
         }
     });
     add_ins_group(app, ui);
+}
+
+/// Record Macro, or Stop Recording: the recorded macro opens in the editor.
+pub fn toggle_recording(app: &mut SlideApp) {
+    let recording = app.session.recording.is_some();
+    match app.run("developer.recordMacro", json!({"stop": recording})) {
+        Ok(r) if recording => {
+            let module = r.get("module").and_then(Json::as_str).unwrap_or("Module1").to_string();
+            let steps = r.get("steps").and_then(Json::as_u64).unwrap_or(0);
+            app.set_status(format!("Recorded {steps} steps into {module}"));
+            open_editor(app, Some(&module));
+        }
+        Ok(_) => app.set_status("Recording a macro: what you do now goes into it. Stop Recording on the Developer tab ends it."),
+        Err(_) => {}
+    }
+}
+
+/// The presentation's ribbon tabs (DeckCraft tab name, groups), read again when it changed.
+fn deck(app: &mut SlideApp) -> (DeckTabs, bool) {
+    let Some(d) = app.session.active() else { return Default::default() };
+    let key = (d.uid, std::sync::Arc::as_ptr(&d.doc) as usize);
+    if let Some((uid, ptr, tabs, editable)) = &app.addins.deck
+        && (*uid, *ptr) == key
+    {
+        return (tabs.clone(), *editable);
+    }
+    let (r, editable) = deckcraft_engine::cmd::developer::current_ribbon(&app.session);
+    let mut tabs: Vec<(String, Vec<RibbonGroup>)> = Vec::new();
+    for t in r.tabs {
+        let name = deckcraft_engine::cmd::developer::tab_name(&t);
+        match tabs.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+            Some((_, groups)) => groups.extend(t.groups),
+            None => tabs.push((name, t.groups)),
+        }
+    }
+    let tabs = Rc::new(tabs);
+    app.addins.deck = Some((key.0, key.1, tabs.clone(), editable));
+    (tabs, editable)
+}
+
+/// The presentation's own tabs (not DeckCraft's or an add-in's), for the tab row.
+pub fn deck_tabs(app: &mut SlideApp, shown: &[&str]) -> Vec<String> {
+    deck(app).0.iter().map(|(n, _)| n.clone()).filter(|n| !shown.iter().any(|s| s.eq_ignore_ascii_case(n)) && n != "Developer").collect()
+}
+
+/// The picture names offered for a button (Office's `imageMso` names) and the icon DeckCraft draws.
+const PICTURES: &[(&str, Icon)] = &[
+    ("MacroPlay", Icon::Macros),
+    ("HappyFace", Icon::Star),
+    ("FileSave", Icon::Save),
+    ("FilePrint", Icon::Print),
+    ("Copy", Icon::Copy),
+    ("Paste", Icon::Paste),
+    ("Cut", Icon::Cut),
+    ("SlideShowFromBeginning", Icon::Play),
+];
+
+fn picture(name: Option<&str>) -> Icon {
+    let Some(name) = name else { return Icon::Macros };
+    PICTURES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, i)| *i).or_else(|| icon_named(name)).unwrap_or(Icon::Macros)
+}
+
+/// Draws the presentation's groups on `tab` (after the tab's own groups and the add-ins').
+pub fn deck_ribbon_groups(app: &mut SlideApp, ui: &mut Ui, tab: &str) {
+    let (tabs, _) = deck(app);
+    let mut press = None;
+    for g in tabs.iter().filter(|(n, _)| n.eq_ignore_ascii_case(tab)).flat_map(|(_, g)| g) {
+        group(ui, |ui| {
+            let mut k = 0;
+            while let Some(b) = g.buttons.get(k) {
+                if b.large {
+                    let tip = b.screentip.clone().unwrap_or_else(|| format!("Runs {}", b.on_action));
+                    if named(big_button(ui, picture(b.image.as_deref()), &b.label, true), &b.label).on_hover_text(tip).clicked() {
+                        press = Some(b.id.clone());
+                    }
+                    k += 1;
+                    continue;
+                }
+                let column: Vec<_> = g.buttons.iter().skip(k).take_while(|b| !b.large).take(3).collect();
+                k += column.len().max(1);
+                ui.vertical(|ui| {
+                    for b in column {
+                        let tip = b.screentip.clone().unwrap_or_else(|| format!("Runs {}", b.on_action));
+                        if named(small_button(ui, picture(b.image.as_deref()), &b.label, true, false), &b.label).on_hover_text(tip).clicked() {
+                            press = Some(b.id.clone());
+                        }
+                    }
+                });
+            }
+        });
+    }
+    if let Some(id) = press {
+        let _ = app.run("developer.pressRibbonButton", json!({"id": id}));
+    }
+}
+
+/// Opens Developer › Ribbon Buttons, with `macro_name` filled in.
+pub fn open_buttons(app: &mut SlideApp, macro_name: Option<&str>) {
+    let mut w = ButtonsWindow { tab: "Macros".into(), group: "Macros".into(), image: "MacroPlay".into(), ..Default::default() };
+    if let Ok(r) = app.session.execute("developer.macros", &json!({})) {
+        w.macros = r
+            .get("macros")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m.get("name").and_then(Json::as_str))
+            .map(str::to_string)
+            .collect();
+    }
+    w.macro_name = macro_name.map(str::to_string).or_else(|| w.macros.first().cloned()).unwrap_or_default();
+    app.addins.buttons = Some(w);
+}
+
+fn buttons_window(app: &mut SlideApp, ctx: &egui::Context) {
+    let Some(mut w) = app.addins.buttons.take() else { return };
+    let mut open = true;
+    let mut close = false;
+    let (tabs, editable) = deck(app);
+    let mut remove = None;
+    let mut add = None;
+    egui::Window::new("Ribbon Buttons").id(egui::Id::new("dev_buttons")).collapsible(false).resizable(false).default_width(480.0).open(&mut open).show(
+        ctx,
+        |ui| {
+            ui.weak("Buttons that run this presentation's macros. They are saved with the presentation, and PowerPoint shows them too.");
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_width(440.0);
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    if tabs.iter().all(|(_, g)| g.is_empty()) {
+                        ui.weak("No buttons yet.");
+                    }
+                    for (tab, groups) in tabs.iter() {
+                        for g in groups {
+                            for b in &g.buttons {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{tab} › {} › {}", g.label, b.label));
+                                    ui.weak(format!("runs {}", b.on_action));
+                                    if editable && ui.small_button("Remove").clicked() {
+                                        remove = Some(b.id.clone());
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+            });
+            if !editable {
+                ui.label(
+                    RichText::new("This presentation's ribbon came from another program with more than buttons: its buttons run, but DeckCraft doesn't change it.")
+                        .weak(),
+                );
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+                return;
+            }
+            ui.add_space(4.0);
+            ui.strong("New button");
+            egui::Grid::new("dev_button_form").num_columns(2).spacing(vec2(8.0, 4.0)).show(ui, |ui| {
+                ui.label("Macro:");
+                egui::ComboBox::from_id_salt("dev_button_macro").selected_text(w.macro_name.clone()).width(260.0).show_ui(ui, |ui| {
+                    for m in &w.macros {
+                        ui.selectable_value(&mut w.macro_name, m.clone(), m);
+                    }
+                });
+                ui.end_row();
+                ui.label("");
+                ui.add(egui::TextEdit::singleline(&mut w.macro_name).hint_text("or type a name: Module1.Go").desired_width(260.0));
+                ui.end_row();
+                ui.label("Label:");
+                ui.add(egui::TextEdit::singleline(&mut w.label).hint_text("the macro's name").desired_width(260.0));
+                ui.end_row();
+                ui.label("Tab:");
+                egui::ComboBox::from_id_salt("dev_button_tab").selected_text(w.tab.clone()).width(260.0).show_ui(ui, |ui| {
+                    for t in ["Macros", "Home", "Insert", "Design", "Transitions", "Animations", "Slide Show", "Review", "View", "Developer"] {
+                        ui.selectable_value(&mut w.tab, t.to_string(), t);
+                    }
+                });
+                ui.end_row();
+                ui.label("");
+                ui.add(egui::TextEdit::singleline(&mut w.tab).hint_text("or a new tab's name").desired_width(260.0));
+                ui.end_row();
+                ui.label("Group:");
+                ui.add(egui::TextEdit::singleline(&mut w.group).desired_width(260.0));
+                ui.end_row();
+                ui.label("Picture:");
+                egui::ComboBox::from_id_salt("dev_button_picture").selected_text(w.image.clone()).width(260.0).show_ui(ui, |ui| {
+                    for (name, _) in PICTURES {
+                        ui.selectable_value(&mut w.image, name.to_string(), *name);
+                    }
+                });
+                ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut w.small, "Small button (three to a column)");
+                ui.end_row();
+            });
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!w.macro_name.trim().is_empty(), egui::Button::new("Add")).clicked() {
+                    add = Some(json!({"macro": w.macro_name.trim(), "label": w.label.trim(), "tab": w.tab.trim(), "group": w.group.trim(), "image": w.image, "large": !w.small}));
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+            if let Some(e) = &w.error {
+                ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+            }
+        },
+    );
+    if let Some(params) = add {
+        match app.run("developer.addRibbonButton", params) {
+            Ok(_) => {
+                w.error = None;
+                w.label.clear();
+            }
+            Err(e) => w.error = Some(e),
+        }
+    }
+    if let Some(id) = remove
+        && let Err(e) = app.run("developer.removeRibbonButton", json!({"id": id}))
+    {
+        w.error = Some(e);
+    }
+    if open && !close {
+        app.addins.buttons = Some(w);
+    }
 }
 
 /// The Add-ins button (Insert and Developer tabs).
@@ -332,6 +600,7 @@ pub fn windows(app: &mut SlideApp, ctx: &egui::Context) {
     macros_window(app, ctx);
     editor_window(app, ctx);
     security_window(app, ctx);
+    buttons_window(app, ctx);
 }
 
 fn macros_window(app: &mut SlideApp, ctx: &egui::Context) {
@@ -339,6 +608,7 @@ fn macros_window(app: &mut SlideApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close = false;
     let mut edit: Option<String> = None;
+    let mut to_ribbon: Option<String> = None;
     let enabled = deckcraft_engine::cmd::developer::macros_allowed(&app.session);
     egui::Window::new("Macros").id(egui::Id::new("dev_macros")).collapsible(false).resizable(false).default_width(460.0).open(&mut open).show(
         ctx,
@@ -382,6 +652,13 @@ fn macros_window(app: &mut SlideApp, ctx: &egui::Context) {
                 {
                     edit = m.get("module").and_then(Json::as_str).map(str::to_string);
                 }
+                if ui
+                    .add_enabled(chosen.is_some(), egui::Button::new("Add to Ribbon…"))
+                    .on_hover_text("A ribbon button that runs this macro")
+                    .clicked()
+                {
+                    to_ribbon = chosen.clone();
+                }
                 let name = w.new_name.trim().to_string();
                 let valid = !name.is_empty()
                     && name.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -407,6 +684,10 @@ fn macros_window(app: &mut SlideApp, ctx: &egui::Context) {
     );
     if let Some(module) = edit {
         open_editor(app, Some(&module));
+        return;
+    }
+    if let Some(name) = to_ribbon {
+        open_buttons(app, Some(&name));
         return;
     }
     if open && !close {

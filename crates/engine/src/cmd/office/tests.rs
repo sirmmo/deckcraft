@@ -173,6 +173,8 @@ fn a_failing_action_changes_nothing_and_says_which() {
         let r = sync(&mut s, &a, json!([bad]));
         assert!(r["error"]["code"].is_string(), "{bad} → {r}");
     }
+    // Office.js's GeometricShapeType names map to the presets (msoShapeRightTriangle from VBA).
+    assert_eq!(super::preset_of("rightTriangle").ok().as_deref(), Some("rtTriangle"));
 }
 
 #[test]

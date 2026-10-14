@@ -2,12 +2,24 @@
 //! `"macros": {"language": "VBA"}` does (protocol 1.1, `macros/*`), and reaches the presentation
 //! back through the host requests answered here ([`host_call`]: `host/sync` on the same objects as
 //! Office add-ins, the presentation's `vbaProject.bin`, messages). Running a macro is one undoable
-//! step. PowerPoint has no macro recorder, and neither has DeckCraft.
+//! step.
+//!
+//! Record Macro (`developer.recordMacro`) is a DeckCraft extra: PowerPoint dropped its macro
+//! recorder, DeckCraft keeps one. It notes where the journal stands, and on Stop sends the
+//! commands run since (`[{command, params}]`, DeckCraft command ids) to the add-in's
+//! `macros/record`, which answers the macro's code; that goes at the end of a module.
+//!
+//! The presentation's ribbon (`developer.ribbon`, `addRibbonButton`…): tabs, groups and buttons
+//! that run its macros, saved with it (`customUI14.xml`) so PowerPoint shows them too. A button runs
+//! its macro as PowerPoint does, with the button as the argument (`Sub Go(control As
+//! IRibbonControl)`).
 //!
 //! Macro security (`prefs.macro_security`): `disable` runs nothing; `prompt` (the default) runs a
 //! presentation's macros once the user enabled them for it (`developer.enableMacros`, the message
 //! bar's Enable Content); `enable` runs all.
 
+use deckcraft_model::ribbon::{MAX_RIBBON_ITEMS, builtin_tab_id, builtin_tab_name};
+use deckcraft_model::{Ribbon, RibbonButton, RibbonGroup, RibbonTab};
 use deckcraft_plugin::office::{Action, Permission};
 use deckcraft_plugin::{HostError, call_macros, macro_plugins};
 use serde_json::{Value as Json, json};
@@ -41,6 +53,53 @@ pub fn specs() -> Vec<CommandSpec> {
             save_module
         ),
         cmd!("developer.deleteModule", "Remove Module", ["Developer", "Code"], None, "{name, plugin?} → {}", always, delete_module),
+        cmd!(query "developer.recordToCode", "Macro from Steps", ["Developer", "Code"], None, "{steps: [{command, params}], name?, plugin?} → {source}. The steps as a macro's code", always, record_to_code),
+        cmd!(
+            noundo "developer.recordMacro",
+            "Record Macro",
+            ["Developer", "Code"],
+            None,
+            "{stop?: bool, module?: \"Module1\", name?: \"Macro1\"} → {recording} or, when stopping, {module, source, steps}. Records what you do as a macro in the module (a DeckCraft extra: PowerPoint has no recorder)",
+            always,
+            record_macro
+        ),
+        cmd!(
+            query "developer.ribbon",
+            "Ribbon Buttons",
+            ["Developer", "Code"],
+            None,
+            "{} → {tabs: [{tab, id, builtin, label, groups: [{id, label, buttons: [{id, label, macro, image, large, screentip, tag}]}]}], editable}. The presentation's own ribbon buttons",
+            always,
+            ribbon
+        ),
+        cmd!(
+            "developer.addRibbonButton",
+            "Add Ribbon Button",
+            ["Developer", "Code"],
+            None,
+            "{macro, label?, tab?: \"Macros\"|Home|Insert…, group?: \"Macros\", image?, large?, screentip?, tag?} → {id}. A button that runs the macro, saved with the presentation",
+            always,
+            add_ribbon_button
+        ),
+        cmd!(
+            "developer.editRibbonButton",
+            "Edit Ribbon Button",
+            ["Developer", "Code"],
+            None,
+            "{id, macro?, label?, image?, large?, screentip?, tag?} → {id}",
+            always,
+            edit_ribbon_button
+        ),
+        cmd!("developer.removeRibbonButton", "Remove Ribbon Button", ["Developer", "Code"], None, "{id} → {}", always, remove_ribbon_button),
+        cmd!(
+            "developer.pressRibbonButton",
+            "Press Ribbon Button",
+            ["Developer", "Code"],
+            None,
+            "{id} → {ran}. Runs the button's macro, as clicking it does",
+            always,
+            press_ribbon_button
+        ),
         cmd!(noundo "developer.enableMacros", "Enable Content", ["Developer", "Code"], None, "{on?: bool} → {enabled}. Lets this presentation's macros run (until it closes)", always, enable_macros),
         cmd!(
             noundo "developer.macroSecurity",
@@ -172,6 +231,264 @@ fn run_macro(s: &mut Session, p: &Json) -> Result<Json> {
     }
     call(s, &plugin, "macros/run", params)?;
     Ok(json!({"ran": name}))
+}
+
+/// The presentation's ribbon: its own (editable), or the buttons of a richer one kept from the file.
+pub fn current_ribbon(s: &Session) -> (Ribbon, bool) {
+    match s.active() {
+        Some(d) => deckcraft_pptx::custom_ui::current(&d.doc),
+        None => (Ribbon::default(), false),
+    }
+}
+
+/// The DeckCraft tab a ribbon tab shows on.
+pub fn tab_name(t: &RibbonTab) -> String {
+    match &t.builtin {
+        Some(mso) => builtin_tab_name(mso).map(str::to_string).unwrap_or_else(|| mso.trim_start_matches("Tab").to_string()),
+        None if !t.label.trim().is_empty() => t.label.clone(),
+        None => t.id.clone(),
+    }
+}
+
+fn ribbon(s: &mut Session, _p: &Json) -> Result<Json> {
+    let (r, editable) = current_ribbon(s);
+    let tabs: Vec<Json> = r
+        .tabs
+        .iter()
+        .map(|t| {
+            let groups: Vec<Json> = t
+                .groups
+                .iter()
+                .map(|g| {
+                    let buttons: Vec<Json> = g
+                        .buttons
+                        .iter()
+                        .map(|b| json!({"id": b.id, "label": b.label, "macro": b.on_action, "image": b.image, "large": b.large, "screentip": b.screentip, "tag": b.tag}))
+                        .collect();
+                    json!({"id": g.id, "label": g.label, "buttons": buttons})
+                })
+                .collect();
+            json!({"tab": tab_name(t), "id": t.id, "builtin": t.builtin, "label": t.label, "groups": groups})
+        })
+        .collect();
+    Ok(json!({"tabs": tabs, "editable": editable}))
+}
+
+/// Text for a ribbon attribute: trimmed, at most 1024 characters (RibbonX's limit for labels).
+fn text(p: &Json, key: &str) -> Option<String> {
+    str_param(p, key).map(|v| v.trim().chars().take(1024).collect())
+}
+
+/// Changes the presentation's editable ribbon (one undo step); refused when the file brought a
+/// richer ribbon DeckCraft keeps but doesn't change.
+fn edit_ribbon<T>(s: &mut Session, id: &str, f: impl FnOnce(&mut Ribbon) -> Result<T>) -> Result<T> {
+    if !current_ribbon(s).1 {
+        return Err(EngineError::Disabled(
+            id.into(),
+            "this presentation's ribbon came from another program with more than buttons: DeckCraft runs it but doesn't change it".into(),
+        ));
+    }
+    s.edit(|doc, _| {
+        let r = doc.ribbon.get_or_insert_with(Ribbon::default);
+        let out = f(r)?;
+        // A presentation left without buttons has no ribbon part.
+        if r.is_empty() {
+            doc.ribbon = None;
+        }
+        Ok(out)
+    })
+}
+
+/// A macro name a button may run: `Module1.Go`, `Go`, or `'Deck.pptm'!Module1.Go`.
+fn macro_name(id: &str, p: &Json) -> Result<Option<String>> {
+    let Some(m) = text(p, "macro") else { return Ok(None) };
+    let ok = !m.is_empty() && m.len() <= 255 && m.chars().all(|c| c.is_alphanumeric() || "_.!'[] -".contains(c));
+    if !ok {
+        return Err(bad(id, "`macro` is a macro's name, like Module1.Hello"));
+    }
+    Ok(Some(m))
+}
+
+/// `image`: absent (`None`), cleared (`Some(None)`) or a built-in picture's name.
+fn image(id: &str, p: &Json) -> Result<Option<Option<String>>> {
+    match p.get("image") {
+        None => Ok(None),
+        Some(Json::Null) => Ok(Some(None)),
+        Some(Json::String(v)) if v.is_empty() => Ok(Some(None)),
+        Some(Json::String(v)) if v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric()) => Ok(Some(Some(v.clone()))),
+        Some(_) => Err(bad(id, "`image` is a built-in picture's name, like HappyFace")),
+    }
+}
+
+fn add_ribbon_button(s: &mut Session, p: &Json) -> Result<Json> {
+    const ID: &str = "developer.addRibbonButton";
+    let on_action = macro_name(ID, p)?.ok_or_else(|| bad(ID, "missing `macro`"))?;
+    let image = image(ID, p)?.flatten();
+    let label = text(p, "label").filter(|l| !l.is_empty()).unwrap_or_else(|| on_action.rsplit(['.', '!']).next().unwrap_or(&on_action).to_string());
+    let tab = text(p, "tab").filter(|t| !t.is_empty()).unwrap_or_else(|| "Macros".into());
+    let group = text(p, "group").filter(|g| !g.is_empty()).unwrap_or_else(|| "Macros".into());
+    let large = p.get("large").and_then(Json::as_bool).unwrap_or(true);
+    let screentip = text(p, "screentip").filter(|t| !t.is_empty());
+    let tag = text(p, "tag").filter(|t| !t.is_empty());
+    edit_ribbon(s, ID, |r| {
+        let builtin = builtin_tab_id(&tab);
+        let ti = match r.tabs.iter().position(|t| match builtin {
+            Some(mso) => t.builtin.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(mso)),
+            None => t.builtin.is_none() && tab_name(t).eq_ignore_ascii_case(&tab),
+        }) {
+            Some(i) => i,
+            None => {
+                if r.tabs.len() >= MAX_RIBBON_ITEMS {
+                    return Err(bad(ID, "the ribbon has too many tabs"));
+                }
+                let id = if builtin.is_some() { String::new() } else { r.fresh_id("craftTab") };
+                r.tabs.push(RibbonTab {
+                    id,
+                    builtin: builtin.map(str::to_string),
+                    label: if builtin.is_some() { String::new() } else { tab.clone() },
+                    groups: vec![],
+                });
+                r.tabs.len() - 1
+            }
+        };
+        let group_id = r.fresh_id("craftGroup");
+        let button_id = r.fresh_id("craftButton");
+        let t = r.tabs.get_mut(ti).ok_or_else(|| bad(ID, "no such tab"))?;
+        let gi = match t.groups.iter().position(|g| g.label.eq_ignore_ascii_case(&group)) {
+            Some(i) => i,
+            None => {
+                if t.groups.len() >= MAX_RIBBON_ITEMS {
+                    return Err(bad(ID, "the tab has too many groups"));
+                }
+                t.groups.push(RibbonGroup { id: group_id, label: group, buttons: vec![] });
+                t.groups.len() - 1
+            }
+        };
+        let g = t.groups.get_mut(gi).ok_or_else(|| bad(ID, "no such group"))?;
+        if g.buttons.len() >= MAX_RIBBON_ITEMS {
+            return Err(bad(ID, "the group has too many buttons"));
+        }
+        g.buttons.push(RibbonButton { id: button_id.clone(), label, on_action, image, large, screentip, supertip: None, tag });
+        Ok(json!({"id": button_id}))
+    })
+}
+
+fn edit_ribbon_button(s: &mut Session, p: &Json) -> Result<Json> {
+    const ID: &str = "developer.editRibbonButton";
+    let id = str_param(p, "id").ok_or_else(|| bad(ID, "missing `id`"))?.to_string();
+    let on_action = macro_name(ID, p)?;
+    let image = image(ID, p)?;
+    edit_ribbon(s, ID, |r| {
+        let b = r.button_mut(&id).ok_or_else(|| bad(ID, format!("no ribbon button `{id}`")))?;
+        if let Some(m) = on_action {
+            b.on_action = m;
+        }
+        if let Some(l) = text(p, "label").filter(|l| !l.is_empty()) {
+            b.label = l;
+        }
+        if let Some(i) = image {
+            b.image = i;
+        }
+        if let Some(l) = p.get("large").and_then(Json::as_bool) {
+            b.large = l;
+        }
+        if let Some(t) = text(p, "screentip") {
+            b.screentip = Some(t).filter(|t| !t.is_empty());
+        }
+        if let Some(t) = text(p, "tag") {
+            b.tag = Some(t).filter(|t| !t.is_empty());
+        }
+        Ok(json!({"id": id}))
+    })
+}
+
+fn remove_ribbon_button(s: &mut Session, p: &Json) -> Result<Json> {
+    const ID: &str = "developer.removeRibbonButton";
+    let id = str_param(p, "id").ok_or_else(|| bad(ID, "missing `id`"))?.to_string();
+    edit_ribbon(s, ID, |r| if r.remove_button(&id) { Ok(json!({})) } else { Err(bad(ID, format!("no ribbon button `{id}`"))) })
+}
+
+fn press_ribbon_button(s: &mut Session, p: &Json) -> Result<Json> {
+    const ID: &str = "developer.pressRibbonButton";
+    let id = str_param(p, "id").ok_or_else(|| bad(ID, "missing `id`"))?;
+    let (r, _) = current_ribbon(s);
+    let b = r.button(id).ok_or_else(|| bad(ID, format!("no ribbon button `{id}`")))?;
+    // The form `'Deck.pptm'!Module1.Go` names this presentation's macro.
+    let name = b.on_action.rsplit('!').next().unwrap_or(&b.on_action).to_string();
+    run_macro(s, &json!({"name": name, "control": {"id": b.id, "tag": b.tag.clone().unwrap_or_default()}}))
+}
+
+/// Most steps one recording sends to the add-in (the journal holds at most 10 000).
+const MAX_RECORDED_STEPS: usize = 10_000;
+
+fn record_to_code(s: &mut Session, p: &Json) -> Result<Json> {
+    const ID: &str = "developer.recordToCode";
+    let steps = p
+        .get("steps")
+        .and_then(Json::as_array)
+        .filter(|a| a.len() <= MAX_RECORDED_STEPS)
+        .cloned()
+        .ok_or_else(|| bad(ID, "missing `steps` (a list of at most 10000 {command, params})"))?;
+    let (plugin, _) = macro_plugin(ID, p)?;
+    let mut params = json!({"steps": steps});
+    if let Some(name) = macro_proc_name(ID, p)? {
+        params["name"] = json!(name);
+    }
+    call(s, &plugin, "macros/record", params)
+}
+
+/// `name`: the recorded macro's name (a VBA identifier), when given.
+fn macro_proc_name(id: &str, p: &Json) -> Result<Option<String>> {
+    let Some(name) = str_param(p, "name").map(str::trim).filter(|n| !n.is_empty()) else { return Ok(None) };
+    let ok = name.len() <= 255 && name.chars().all(|c| c.is_alphanumeric() || c == '_') && name.chars().next().is_some_and(char::is_alphabetic);
+    if !ok {
+        return Err(bad(id, "`name` is a macro's name: letters, digits and _, starting with a letter"));
+    }
+    Ok(Some(name.to_string()))
+}
+
+/// Journal entries a recording leaves out: the Developer tab itself and what add-ins do.
+fn recordable(id: &str) -> bool {
+    !id.starts_with("developer.") && !id.starts_with("plugins.") && !id.starts_with("office.")
+}
+
+fn record_macro(s: &mut Session, p: &Json) -> Result<Json> {
+    const ID: &str = "developer.recordMacro";
+    let stop = p.get("stop").and_then(Json::as_bool).unwrap_or(s.recording.is_some());
+    let name = macro_proc_name(ID, p)?;
+    if !stop {
+        macro_plugin(ID, p)?;
+        s.recording = Some(s.journal.len());
+        return Ok(json!({"recording": true}));
+    }
+    let Some(start) = s.recording.take() else { return Ok(json!({"recording": false})) };
+    let steps: Vec<Json> = s
+        .journal
+        .iter()
+        .skip(start)
+        .filter(|(id, _)| recordable(id))
+        .take(MAX_RECORDED_STEPS)
+        .map(|(id, p)| json!({"command": id, "params": p}))
+        .collect();
+    let (plugin, _) = macro_plugin(ID, p)?;
+    let mut params = json!({"steps": steps});
+    if let Some(n) = &name {
+        params["name"] = json!(n);
+    }
+    let code = call(s, &plugin, "macros/record", params)?;
+    let source = code.get("source").and_then(Json::as_str).unwrap_or("").to_string();
+    // The new macro goes at the end of the module (Module1 by default).
+    let module = str_param(p, "module").map(str::trim).filter(|m| !m.is_empty()).unwrap_or("Module1").chars().take(255).collect::<String>();
+    let existing = call(s, &plugin, "macros/modules", json!({}))?;
+    let before = existing
+        .get("modules")
+        .and_then(Json::as_array)
+        .and_then(|m| m.iter().find(|x| x.get("name").and_then(Json::as_str) == Some(module.as_str())))
+        .and_then(|m| m.get("source").and_then(Json::as_str))
+        .map(|t| format!("{}\r\n\r\n", t.trim_end()))
+        .unwrap_or_default();
+    call(s, &plugin, "macros/saveModule", json!({"name": module, "source": format!("{before}{source}")}))?;
+    Ok(json!({"recording": false, "module": module, "source": source, "steps": steps.len()}))
 }
 
 fn modules(s: &mut Session, p: &Json) -> Result<Json> {

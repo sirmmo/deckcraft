@@ -96,6 +96,81 @@ fn an_add_ins_buttons_and_the_developer_tab_with_its_macros_bar() {
     assert!(h.query_by_label("Go Now").is_none(), "an add-in turned off takes its buttons away");
 }
 
+#[test]
+fn a_presentations_ribbon_buttons_show_on_their_tabs_and_run_their_macros() {
+    use deckcraft_model::{Ribbon, RibbonButton, RibbonGroup, RibbonTab};
+    // No macro add-in loaded meanwhile: the buttons show without one.
+    let _one_at_a_time = ADDINS.lock().unwrap_or_else(|e| e.into_inner());
+    let button = |id: &str, label: &str| RibbonButton {
+        id: id.into(),
+        label: label.into(),
+        on_action: format!("Module1.{label}"),
+        large: true,
+        ..Default::default()
+    };
+    let group = |b| vec![RibbonGroup { id: "g".into(), label: "G".into(), buttons: vec![b] }];
+    let mut s = Session::with_new();
+    s.edit(|doc, _| {
+        doc.ribbon = Some(Ribbon {
+            tabs: vec![
+                RibbonTab { id: "tTools".into(), label: "Tools".into(), groups: group(button("b1", "Go")), ..Default::default() },
+                RibbonTab { builtin: Some("TabHome".into()), groups: group(button("b2", "Hello")), ..Default::default() },
+            ],
+        });
+        Ok(())
+    })
+    .unwrap();
+    let mut h = harness(s, Services::default());
+    // On Home, after Home's own groups.
+    assert!(h.query_by_label("Hello").is_some(), "the presentation's button on Home");
+    assert!(h.query_by_label("Go").is_none());
+    h.state_mut().ui.tab = "Tools".into();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.tab, "Tools", "the presentation's own tab joins the tab row (an unknown one falls back to Home)");
+    h.get_by_label("Go").click();
+    h.run_steps(3);
+    // Macros start disabled: the click says so instead of running.
+    let said = h.state().status.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.contains("disabled"), "{said}");
+    // Developer › Ribbon Buttons adds one more, saved in the presentation.
+    super::open_buttons(h.state_mut(), Some("Module1.Report"));
+    h.run_steps(3);
+    h.get_by_label("Add").click();
+    h.run_steps(3);
+    let ribbon = h.state().session.active().unwrap().doc.ribbon.clone().unwrap();
+    let added = ribbon.tabs.iter().find(|t| t.label == "Macros").and_then(|t| t.groups.first()).and_then(|g| g.buttons.first()).cloned();
+    assert_eq!(added.map(|b| (b.label, b.on_action, b.image)), Some(("Report".into(), "Module1.Report".into(), Some("MacroPlay".into()))));
+    h.state_mut().addins.buttons = None;
+    h.state_mut().ui.tab = "Macros".into();
+    h.run_steps(3);
+    assert!(h.query_by_label("Report").is_some());
+}
+
+#[test]
+fn record_macro_toggles_on_the_developer_tab() {
+    let _one_at_a_time = ADDINS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = deckcraft_engine::plugin::Manifest::parse(
+        &json!({"id": "t.ui-recorder", "name": "Recorder Test", "macros": {"language": "VBA"}, "run": {"command": "./not-started"}}).to_string(),
+    )
+    .unwrap();
+    deckcraft_engine::plugin::install(m, std::env::temp_dir()).unwrap();
+    let _unload = Unload("t.ui-recorder");
+    let mut h = harness(Session::with_new(), Services::default());
+    h.state_mut().ui.tab = "Developer".into();
+    h.run_steps(3);
+    assert!(h.query_by_label("Ribbon Buttons").is_some());
+    h.get_by_label("Record Macro").click();
+    h.run_steps(3);
+    assert!(h.state().session.recording.is_some());
+    // Stopping asks the add-in for the code; this one can't start, which the status says.
+    h.get_by_label("Stop Recording").click();
+    h.run_steps(3);
+    assert!(h.state().session.recording.is_none());
+    assert!(h.query_by_label("Record Macro").is_some());
+    let said = h.state().status.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.contains("not-started") || said.contains("start"), "{said}");
+}
+
 /// A web view host that records what it was asked and lets the test post a page's messages.
 #[derive(Clone, Default)]
 struct FakeWeb(Arc<Mutex<Web>>);

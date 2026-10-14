@@ -1,6 +1,6 @@
 # Add-ins, Office add-ins and macros
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** major (first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-15 · **Change:** minor (ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 DeckCraft runs three kinds of extension, all as **add-ins** listed in the Add-ins window (Insert ›
 Add-ins, Developer › Add-ins):
@@ -70,11 +70,41 @@ requests of its own; DeckCraft answers them, then waits again:
 
 What the add-in changes this way is part of the running command's one undo step.
 
-**Macros** (`"macros"` in the manifest): `macros/list`, `macros/run {name, control?}`,
-`macros/modules`, `macros/saveModule {name, source}`, `macros/deleteModule {name}`, as in GridCraft.
-PowerPoint has no macro recorder, and neither has DeckCraft. Commands: `developer.macros`,
+**Macros** (`"macros"` in the manifest): `macros/list`, `macros/run {name, control?: {id, tag}}`,
+`macros/modules`, `macros/saveModule {name, source}`, `macros/deleteModule {name}`,
+`macros/record {steps, name?}` → `{source}`, as in GridCraft. Commands: `developer.macros`,
 `developer.runMacro {name}`, `developer.modules`, `developer.saveModule`, `developer.deleteModule`,
+`developer.recordMacro {stop?, module?, name?}`, `developer.recordToCode {steps, name?}`,
 `developer.enableMacros`, `developer.macroSecurity {level}`.
+
+**Record Macro** (Developer › Code; a **DeckCraft extra**: PowerPoint dropped its macro recorder
+in PowerPoint 2007, DeckCraft has one). Record Macro notes where the command journal stands; Stop
+Recording sends what you did since to the add-in as `macros/record {steps: [{command, params}],
+name?}`, with DeckCraft's own command ids and their params exactly as journaled (slide indexes
+0-based, shape and slide ids the engine's numbers, colours `#RRGGBB`), and puts the `source` it
+answers at the end of Module1, which opens in the editor. The Developer tab's own commands and what
+add-ins do (`developer.*`, `plugins.*`, `office.*`) aren't recorded; Delete while editing text is
+journaled as the text delete it is (`text.delete {dir: forward}`), not as a shape delete. craft-vba
+writes PowerPoint VBA from the steps (0.1.5 and later); steps it can't express become comments.
+`developer.recordToCode {steps}` turns steps given directly into code without a recording.
+
+**Ribbon buttons** (Developer › Ribbon Buttons, or Add to Ribbon… in the Macros window): buttons
+that run the presentation's macros, on a built-in tab or one of the presentation's own. They are
+saved with the presentation as the Office ribbon part (`customUI/customUI14.xml`, related from the
+package root), so PowerPoint shows them too, and a presentation made in PowerPoint brings its
+buttons along (`customUI14.xml` or the Office 2007 `customUI.xml`). A ribbon that holds more than
+tabs, groups and buttons (pictures of its own, menus, `onLoad`) is kept unchanged, pictures
+included: its buttons show and run but can't be edited. A button runs its macro as PowerPoint does,
+with the button: `macros/run` gets `control: {id, tag}`, which a VBA add-in passes as the
+`IRibbonControl` argument (`Sub Go(control As IRibbonControl)`); a macro without parameters runs as
+it is. The buttons show whether or not a macro add-in is loaded (without one, a click says so).
+Commands: `developer.ribbon` → `{tabs: [{tab, id, builtin, label, groups: [{id, label, buttons:
+[{id, label, macro, image, large, screentip, tag}]}]}], editable}`,
+`developer.addRibbonButton {macro, label?, tab?: "Macros", group?: "Macros", image?, large?,
+screentip?, tag?}` → `{id}`, `developer.editRibbonButton {id, …}`,
+`developer.removeRibbonButton {id}`, `developer.pressRibbonButton {id}` → `{ran}`. Built-in tabs
+by name: Home, Insert, Design, Transitions, Animations, Slide Show, Review, View, Developer
+(`TabHome`…); any other name is a tab of the presentation's own.
 
 **Macro security** (Developer › Macro Security): `prompt`, the default, runs a presentation's macros
 once the user clicked **Enable Content** in the bar a presentation with macros opens with;
@@ -138,4 +168,5 @@ A macro is one undo step; a run-time error takes everything it did back
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Ribbon buttons that run macros (`customUI14.xml`, `macros/run` gets `control`); Record Macro and `developer.recordToCode` (`macros/record`), a DeckCraft extra |
 | 2026-10-14 | major | First version: add-ins (shared manifest and protocol 1 and 1.1), Office add-ins' task panes with DeckCraft's Office.js, VBA macros through craft-vba, the Developer tab |
