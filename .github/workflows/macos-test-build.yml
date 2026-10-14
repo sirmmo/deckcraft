@@ -1,0 +1,122 @@
+# Fork-only test build: builds DeckCraft for macOS from any branch, tag or commit and publishes it
+# as a GitHub pre-release on this fork. Ad-hoc signed, not notarized (no Apple secrets here): on
+# the Mac, open it with right-click › Open, or run `xattr -dr com.apple.quarantine DeckCraft.app`.
+#
+# Run: Actions › "macOS test build" › Run workflow, or
+#   gh workflow run macos-test-build.yml -R sirmmo/deckcraft -f ref=feat/plugin-host
+name: macOS test build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build"
+        type: string
+        default: main
+      arch:
+        description: "aarch64 (Apple silicon), x86_64 (Intel) or universal (both, slower)"
+        type: choice
+        options: [aarch64, universal, x86_64]
+        default: aarch64
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-test-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Upstream has its own signed release workflow; this one is for the fork.
+    if: github.repository == 'sirmmo/deckcraft'
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Version and tag
+        id: meta
+        env:
+          REF: ${{ inputs.ref }}
+          ARCH: ${{ inputs.arch }}
+        run: |
+          base="$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)"
+          sha="$(git rev-parse --short=8 HEAD)"
+          slug="$(printf '%s' "$REF" | tr -c 'A-Za-z0-9.\n' '-' | sed 's/-*$//')"
+          if [ "$ARCH" = universal ]; then targets=aarch64-apple-darwin,x86_64-apple-darwin; else targets="$ARCH-apple-darwin"; fi
+          {
+            echo "version=$base-test.$GITHUB_RUN_NUMBER"
+            echo "tag=macos-test-$slug-$GITHUB_RUN_NUMBER"
+            echo "sha=$sha"
+            echo "targets=$targets"
+          } >>"$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: ${{ steps.meta.outputs.targets }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: macos-test-${{ inputs.arch }}
+
+      # Branches with Office add-ins also build their Office.js library (wasm), which
+      # package.sh puts in the app bundle's Resources.
+      - name: Office.js library
+        if: hashFiles('crates/office-js/Cargo.toml') != ''
+        run: |
+          rustup target add wasm32-unknown-unknown
+          ver="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[" ]/,"",$0); sub(/version=/,"",$0); print; exit}' Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "$ver" --locked
+          cargo xtask office-js
+
+      - name: Build and package (ad-hoc signed)
+        env:
+          DECKCRAFT_VERSION: ${{ steps.meta.outputs.version }}
+        run: packaging/macos/package.sh --arch "${{ inputs.arch }}"
+
+      # Branches with the plugin host also ship the example add-in, ready to load with
+      # the Add-ins window (or `--plugin`).
+      - name: Example add-in
+        if: hashFiles('crates/plugin/src/bin/example_plugin.rs') != ''
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          ARCH: ${{ inputs.arch }}
+          TARGETS: ${{ steps.meta.outputs.targets }}
+        run: |
+          inputs=()
+          for t in ${TARGETS//,/ }; do
+            cargo build --release --locked -p deckcraft-plugin --bin deckcraft-example-plugin --target "$t"
+            inputs+=("target/$t/release/deckcraft-example-plugin")
+          done
+          dir="target/example-plugin/example"
+          mkdir -p "$dir"
+          lipo -create -output "$dir/deckcraft-example-plugin" "${inputs[@]}"
+          codesign --force --sign - "$dir/deckcraft-example-plugin"
+          "$dir/deckcraft-example-plugin" --manifest \
+            | jq '.run.command = "./deckcraft-example-plugin"' >"$dir/plugin.json"
+          (cd target/example-plugin && ditto -c -k --keepParent example "$GITHUB_WORKSPACE/dist/release/deckcraft-example-plugin-$VERSION-macos-$ARCH.zip")
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REF: ${{ inputs.ref }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          cat >notes.md <<EOF
+          Test build of \`$REF\` ($SHA) for macOS (${{ inputs.arch }}). Not for distribution.
+
+          Ad-hoc signed, not notarized. After copying DeckCraft.app to Applications, run
+          \`xattr -dr com.apple.quarantine /Applications/DeckCraft.app\` (or right-click › Open).
+          Do the same for \`deckcraft-cli\` and the example add-in folder.
+          EOF
+          gh release create "$TAG" dist/release/* --repo "$GITHUB_REPOSITORY" \
+            --target "$(git rev-parse HEAD)" --prerelease --title "macOS test $VERSION ($REF)" --notes-file notes.md
