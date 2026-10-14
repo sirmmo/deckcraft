@@ -12,6 +12,7 @@ workspace = true
 deckcraft-geom = { workspace = true }
 deckcraft-color = { workspace = true }
 deckcraft-model = { workspace = true }
+deckcraft-plugin = { workspace = true }
 deckcraft-fonts = { workspace = true }
 deckcraft-text = { workspace = true }
 deckcraft-render = { workspace = true }
@@ -25,3 +26,9 @@ i_overlay = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 image = { workspace = true }
+
+# Add-ins and macros against a real child process: the test binary serves as the add-in, so it
+# runs without libtest's harness (standard output is the protocol's alone).
+[[test]]
+name = "addins"
+harness = false

@@ -4,7 +4,7 @@ use deckcraft_engine::Session;
 use deckcraft_ui_egui::{Inbox, Services, SlideApp};
 use wasm_bindgen::JsCast as _;
 
-const PRESENTATION_EXTS: &[&str] = &["deckcraft", "pptx", "potx", "ppsx", "txt", "md"];
+const PRESENTATION_EXTS: &[&str] = &["deckcraft", "pptx", "potx", "ppsx", "pptm", "potm", "ppsm", "txt", "md"];
 const PICTURE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"];
 const AUDIO_EXTS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "aif", "aiff"];
 const VIDEO_EXTS: &[&str] = &["mp4", "m4v", "mov", "webm"];
@@ -170,6 +170,9 @@ fn mime_for(name: &str) -> &'static str {
         Some("pdf") => "application/pdf",
         Some("txt") => "text/plain",
         Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Some("pptm") => "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+        Some("potm") => "application/vnd.ms-powerpoint.template.macroEnabled.12",
+        Some("ppsm") => "application/vnd.ms-powerpoint.slideshow.macroEnabled.12",
         Some("deckcraft") => "application/zip",
         _ => "application/octet-stream",
     }

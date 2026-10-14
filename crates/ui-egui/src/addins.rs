@@ -1,0 +1,771 @@
+//! Add-ins in the interface: their ribbon groups and right-click menu items, the Add-ins window
+//! (install from GitHub, turn on and off, unload), and the Developer tab for an add-in that runs
+//! macros (VBA): Visual Basic (the presentation's code modules in an editor), Macros (list, run,
+//! edit, create), Macro Security, and the "macros disabled" bar with Enable Content. Everything
+//! goes through the `plugins.*` and `developer.*` commands; the add-ins own their behaviour,
+//! DeckCraft the interface.
+
+use std::collections::HashSet;
+
+use deckcraft_engine::plugin::{self, ButtonSize, MenuKind};
+use egui::{RichText, Ui, vec2};
+use serde_json::{Value as Json, json};
+
+use crate::SlideApp;
+use crate::icons::Icon;
+use crate::widgets::{big_button, group, small_button};
+
+/// The add-ins' windows and the install in progress.
+#[derive(Default)]
+pub struct State {
+    pub window: bool,
+    pub install: Install,
+    pub load_path: String,
+    pub macros: Option<MacrosWindow>,
+    pub editor: Option<Editor>,
+    pub security: bool,
+    /// Presentations whose "macros disabled" bar was dismissed or acted on.
+    notice_done: HashSet<u64>,
+}
+
+#[derive(Default)]
+pub struct MacrosWindow {
+    pub list: Vec<Json>,
+    pub selected: usize,
+    pub new_name: String,
+    pub error: Option<String>,
+}
+
+#[derive(Default)]
+pub struct Editor {
+    /// (name, kind, source)
+    pub modules: Vec<(String, String, String)>,
+    pub current: usize,
+    pub text: String,
+    pub dirty: bool,
+    pub error: Option<String>,
+    pub new_module: String,
+}
+
+/// Installing from GitHub: the address typed, the confirmation step, and the download, which runs
+/// on its own thread so the window keeps painting.
+#[derive(Default)]
+pub struct Install {
+    pub url: String,
+    /// The repository waiting for the user's go-ahead (`owner/name`).
+    pub confirming: Option<String>,
+    pending: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    /// The last install's outcome: `Ok(message)` or `Err(error)`.
+    pub outcome: Option<Result<String, String>>,
+}
+
+/// A button or menu item an add-in contributes.
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub plugin: String,
+    pub command: String,
+    pub label: String,
+    pub tooltip: String,
+    pub icon: Icon,
+    pub small: bool,
+    pub params: Json,
+}
+
+/// Whether the Developer tab shows: an add-in that runs macros is loaded.
+pub fn developer_visible() -> bool {
+    !plugin::macro_plugins().is_empty()
+}
+
+fn language() -> String {
+    plugin::macro_plugins().into_iter().next().map(|(_, l)| l).unwrap_or_else(|| "VBA".into())
+}
+
+/// Tabs the add-ins add (after View): their own tab names, not the built-in ones.
+pub fn extra_tabs(built_in: &[&str]) -> Vec<String> {
+    let mut tabs: Vec<String> = Vec::new();
+    for p in plugin::list().into_iter().filter(|p| p.enabled()) {
+        for g in &p.manifest.ui.ribbon {
+            let known = built_in.iter().any(|t| t.eq_ignore_ascii_case(&g.tab)) || (g.tab == "Developer" && developer_visible());
+            if !known && !tabs.contains(&g.tab) {
+                tabs.push(g.tab.clone());
+            }
+        }
+    }
+    tabs
+}
+
+/// The add-ins' groups on `tab`: (group name, buttons).
+pub fn groups(tab: &str) -> Vec<(String, Vec<Item>)> {
+    let mut out = Vec::new();
+    for p in plugin::list().into_iter().filter(|p| p.enabled()) {
+        let m = &p.manifest;
+        for g in m.ui.ribbon.iter().filter(|g| g.tab == tab) {
+            let buttons = g
+                .buttons
+                .iter()
+                .map(|b| {
+                    let decl = m.command(&b.command);
+                    Item {
+                        plugin: m.id.clone(),
+                        command: b.command.clone(),
+                        label: b.label.clone().or_else(|| decl.map(|c| c.label.clone())).unwrap_or_else(|| b.command.clone()),
+                        tooltip: b.tooltip.clone().or_else(|| decl.map(|c| c.description.clone())).unwrap_or_default(),
+                        icon: b.icon.as_deref().and_then(icon_named).unwrap_or(Icon::Macros),
+                        small: b.size == ButtonSize::Small,
+                        params: b.params.clone(),
+                    }
+                })
+                .collect();
+            out.push((g.group.clone(), buttons));
+        }
+    }
+    out
+}
+
+/// The add-ins' items for a right-click menu.
+pub fn menu_items(kind: MenuKind) -> Vec<Item> {
+    let mut out = Vec::new();
+    for p in plugin::list().into_iter().filter(|p| p.enabled()) {
+        let m = &p.manifest;
+        for item in m.ui.menus.iter().filter(|i| i.menu == kind) {
+            let decl = m.command(&item.command);
+            out.push(Item {
+                plugin: m.id.clone(),
+                command: item.command.clone(),
+                label: item.label.clone().or_else(|| decl.map(|c| c.label.clone())).unwrap_or_else(|| item.command.clone()),
+                tooltip: decl.map(|c| c.description.clone()).unwrap_or_default(),
+                icon: Icon::Macros,
+                small: true,
+                params: item.params.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Runs an add-in's command.
+pub fn run(app: &mut SlideApp, item: &Item) {
+    let _ = app.run("plugins.run", json!({"plugin": item.plugin, "command": item.command, "params": item.params}));
+}
+
+/// The add-ins' items at the end of a right-click menu (with a separator before them).
+pub fn context_items(app: &mut SlideApp, ui: &mut Ui, kind: MenuKind) {
+    let items = menu_items(kind);
+    if items.is_empty() {
+        return;
+    }
+    ui.separator();
+    for item in items {
+        if ui.button(&item.label).on_hover_text(&item.tooltip).clicked() {
+            run(app, &item);
+            ui.close();
+        }
+    }
+}
+
+/// Names a painted button for screen readers (and tests).
+fn named(resp: egui::Response, label: &str) -> egui::Response {
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    resp
+}
+
+/// Draws the add-ins' groups on `tab`.
+pub fn ribbon_groups(app: &mut SlideApp, ui: &mut Ui, tab: &str) {
+    for (_group, buttons) in groups(tab) {
+        group(ui, |ui| {
+            let mut k = 0;
+            while let Some(b) = buttons.get(k) {
+                if !b.small {
+                    if named(big_button(ui, b.icon, &b.label, true), &b.label).on_hover_text(&b.tooltip).clicked() {
+                        run(app, b);
+                    }
+                    k += 1;
+                    continue;
+                }
+                let column: Vec<&Item> = buttons.iter().skip(k).take_while(|b| b.small).take(3).collect();
+                k += column.len();
+                ui.vertical(|ui| {
+                    for b in column {
+                        if named(small_button(ui, b.icon, &b.label, true, false), &b.label).on_hover_text(&b.tooltip).clicked() {
+                            run(app, b);
+                        }
+                    }
+                });
+            }
+        });
+    }
+}
+
+/// The icon a manifest names (`"icon": "chart"`); case and `-`/`_` don't matter.
+pub fn icon_named(name: &str) -> Option<Icon> {
+    let key: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+    Some(match key.as_str() {
+        "script" | "plugin" | "macro" | "macros" => Icon::Macros,
+        "paste" => Icon::Paste,
+        "copy" => Icon::Copy,
+        "cut" => Icon::Cut,
+        "slide" | "newslide" => Icon::NewSlide,
+        "table" => Icon::Table,
+        "chart" => Icon::Chart,
+        "picture" | "image" => Icon::Picture,
+        "shapes" | "shape" => Icon::Shapes,
+        "textbox" | "text" => Icon::TextBox,
+        "link" => Icon::Link,
+        "comment" => Icon::Comment,
+        "search" | "find" => Icon::Search,
+        "lock" => Icon::Lock,
+        "settings" => Icon::Settings,
+        "share" => Icon::Share,
+        "folder" | "open" => Icon::OpenFolder,
+        "save" => Icon::Save,
+        "print" => Icon::Print,
+        "info" => Icon::Info,
+        "check" => Icon::Check,
+        "plus" | "add" => Icon::Plus,
+        "minus" => Icon::Minus,
+        "pen" => Icon::Pen,
+        "star" => Icon::Star,
+        "sparkle" | "ai" => Icon::Sparkle,
+        "palette" | "theme" => Icon::Palette,
+        "play" => Icon::Play,
+        "export" => Icon::Export,
+        "more" => Icon::More,
+        _ => return None,
+    })
+}
+
+// ---------------------------------------------------------------- the Developer tab
+
+pub fn developer_ribbon(app: &mut SlideApp, ui: &mut Ui) {
+    group(ui, |ui| {
+        if named(big_button(ui, Icon::Macros, "Visual\nBasic", true), "Visual Basic").on_hover_text("The presentation's code modules").clicked() {
+            open_editor(app, None);
+        }
+        if named(big_button(ui, Icon::Macros, "Macros", true), "Macros").on_hover_text("Run, edit or create a macro").clicked() {
+            open_macros(app);
+        }
+        if named(small_button(ui, Icon::Lock, "Macro Security", true, false), "Macro Security")
+            .on_hover_text("Which presentations' macros may run")
+            .clicked()
+        {
+            app.addins.security = true;
+        }
+    });
+    add_ins_group(app, ui);
+}
+
+/// The Add-ins button (Insert and Developer tabs).
+pub fn add_ins_group(app: &mut SlideApp, ui: &mut Ui) {
+    group(ui, |ui| {
+        if named(big_button(ui, Icon::Plus, "Add-ins", true), "Add-ins").on_hover_text("Install, turn on or off, or unload add-ins").clicked() {
+            app.addins.window = true;
+        }
+    });
+}
+
+pub fn open_macros(app: &mut SlideApp) {
+    let mut w = MacrosWindow::default();
+    match app.session.execute("developer.macros", &json!({})) {
+        Ok(r) => w.list = r.get("macros").and_then(Json::as_array).cloned().unwrap_or_default(),
+        Err(e) => w.error = Some(e.to_string()),
+    }
+    app.addins.macros = Some(w);
+}
+
+pub fn open_editor(app: &mut SlideApp, module: Option<&str>) {
+    let mut e = Editor::default();
+    match app.session.execute("developer.modules", &json!({})) {
+        Ok(r) => {
+            e.modules = r
+                .get("modules")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+                .map(|m| {
+                    let s = |k: &str| m.get(k).and_then(Json::as_str).unwrap_or("").to_string();
+                    (s("name"), s("kind"), s("source"))
+                })
+                .collect();
+        }
+        Err(err) => e.error = Some(err.to_string()),
+    }
+    if let Some(m) = module {
+        e.current = e.modules.iter().position(|(n, _, _)| n == m).unwrap_or(0);
+    }
+    e.text = e.modules.get(e.current).map(|(_, _, s)| s.clone()).unwrap_or_default();
+    app.addins.editor = Some(e);
+}
+
+/// The bar under the ribbon for a presentation whose macros are disabled (Macro Security: prompt).
+pub fn notice_bar(app: &mut SlideApp, ui: &mut Ui) {
+    if !developer_visible() || app.session.prefs.macro_security != "prompt" {
+        return;
+    }
+    let Some(d) = app.session.active() else { return };
+    if !d.doc.has_macros() || d.macros_enabled || app.addins.notice_done.contains(&d.uid) {
+        return;
+    }
+    let uid = d.uid;
+    let t = crate::theme::Tokens::get(ui.ctx());
+    egui::Panel::top("macro_notice").exact_size(32.0).frame(egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(14, 4))).show(
+        ui,
+        |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.label(RichText::new("SECURITY WARNING").strong());
+                ui.label("Macros have been disabled.");
+                if ui.button("Enable Content").clicked() {
+                    let _ = app.run("developer.enableMacros", json!({}));
+                    app.addins.notice_done.insert(uid);
+                }
+                if ui.small_button("✕").on_hover_text("Close").clicked() {
+                    app.addins.notice_done.insert(uid);
+                }
+            });
+        },
+    );
+}
+
+/// Draws the open add-in windows (every frame).
+pub fn windows(app: &mut SlideApp, ctx: &egui::Context) {
+    poll_install(app, ctx);
+    addins_window(app, ctx);
+    macros_window(app, ctx);
+    editor_window(app, ctx);
+    security_window(app, ctx);
+}
+
+fn macros_window(app: &mut SlideApp, ctx: &egui::Context) {
+    let Some(mut w) = app.addins.macros.take() else { return };
+    let mut open = true;
+    let mut close = false;
+    let mut edit: Option<String> = None;
+    let enabled = deckcraft_engine::cmd::developer::macros_allowed(&app.session);
+    egui::Window::new("Macros").id(egui::Id::new("dev_macros")).collapsible(false).resizable(false).default_width(460.0).open(&mut open).show(
+        ctx,
+        |ui| {
+            if !enabled {
+                ui.label(
+                    RichText::new("Macros are disabled for this presentation. Enable Content in the message bar, or change Macro Security.").weak(),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.label("Macro name:");
+                ui.add(egui::TextEdit::singleline(&mut w.new_name).desired_width(260.0));
+            });
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_size(vec2(420.0, 180.0));
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    if w.list.is_empty() {
+                        ui.weak("This presentation has no macros yet: type a name and Create.");
+                    }
+                    for (i, m) in w.list.iter().enumerate() {
+                        let name = m.get("name").and_then(Json::as_str).unwrap_or("");
+                        if ui.selectable_label(i == w.selected, name).clicked() {
+                            w.selected = i;
+                            w.new_name = name.to_string();
+                        }
+                    }
+                });
+            });
+            let chosen = w.list.get(w.selected).and_then(|m| m.get("name")).and_then(Json::as_str).map(str::to_string);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(enabled && chosen.is_some(), egui::Button::new("Run")).clicked()
+                    && let Some(name) = &chosen
+                {
+                    match app.run("developer.runMacro", json!({"name": name})) {
+                        Ok(_) => close = true,
+                        Err(e) => w.error = Some(e),
+                    }
+                }
+                if ui.add_enabled(chosen.is_some(), egui::Button::new("Edit")).clicked()
+                    && let Some(m) = w.list.get(w.selected)
+                {
+                    edit = m.get("module").and_then(Json::as_str).map(str::to_string);
+                }
+                let name = w.new_name.trim().to_string();
+                let valid = !name.is_empty()
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !name.chars().next().is_some_and(|c| c.is_ascii_digit());
+                if ui
+                    .add_enabled(
+                        valid && !w.list.iter().any(|m| m.get("procedure").and_then(Json::as_str) == Some(name.as_str())),
+                        egui::Button::new("Create"),
+                    )
+                    .clicked()
+                {
+                    // A new Sub at the end of Module1, opened in the editor.
+                    edit = Some(create_macro(app, &name, &mut w.error));
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+            if let Some(e) = &w.error {
+                ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+            }
+        },
+    );
+    if let Some(module) = edit {
+        open_editor(app, Some(&module));
+        return;
+    }
+    if open && !close {
+        app.addins.macros = Some(w);
+    }
+}
+
+/// Adds `Sub name()` to Module1 (made when missing); the module's name.
+fn create_macro(app: &mut SlideApp, name: &str, error: &mut Option<String>) -> String {
+    let module = "Module1".to_string();
+    let existing = app
+        .session
+        .execute("developer.modules", &json!({}))
+        .ok()
+        .and_then(|r| r.get("modules").and_then(Json::as_array).cloned())
+        .and_then(|m| m.into_iter().find(|x| x.get("name").and_then(Json::as_str) == Some("Module1")))
+        .and_then(|m| m.get("source").and_then(Json::as_str).map(str::to_string))
+        .map(|t| format!("{}\r\n\r\n", t.trim_end()))
+        .unwrap_or_default();
+    let source = format!("{existing}Sub {name}()\r\n\r\nEnd Sub\r\n");
+    if let Err(e) = app.run("developer.saveModule", json!({"name": module, "source": source})) {
+        *error = Some(e);
+    }
+    module
+}
+
+fn editor_window(app: &mut SlideApp, ctx: &egui::Context) {
+    let Some(mut e) = app.addins.editor.take() else { return };
+    let mut open = true;
+    let title = format!("Visual Basic — {}", app.session.active().map(|d| d.title()).unwrap_or_default());
+    egui::Window::new(title)
+        .id(egui::Id::new("dev_editor"))
+        .collapsible(false)
+        .resizable(true)
+        .default_size(vec2(820.0, 520.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(e.dirty, egui::Button::new("Save"))
+                    .on_hover_text("Saves the module into the presentation (save it as .pptm to keep it)")
+                    .clicked()
+                {
+                    let name = e.modules.get(e.current).map(|(n, _, _)| n.clone()).unwrap_or_else(|| "Module1".into());
+                    match app.run("developer.saveModule", json!({"name": name, "source": e.text})) {
+                        Ok(_) => {
+                            if let Some(m) = e.modules.get_mut(e.current) {
+                                m.2 = e.text.clone();
+                            }
+                            e.dirty = false;
+                            e.error = None;
+                        }
+                        Err(err) => e.error = Some(err),
+                    }
+                }
+                if ui.button("Run Macro…").clicked() {
+                    open_macros(app);
+                }
+                ui.separator();
+                ui.add(egui::TextEdit::singleline(&mut e.new_module).hint_text("Module2").desired_width(120.0));
+                let valid = !e.new_module.trim().is_empty() && !e.modules.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(e.new_module.trim()));
+                if ui.add_enabled(valid, egui::Button::new("Insert Module")).clicked() {
+                    let name = e.new_module.trim().to_string();
+                    let source = format!("Attribute VB_Name = \"{name}\"\r\n");
+                    match app.run("developer.saveModule", json!({"name": name, "source": source})) {
+                        Ok(_) => {
+                            e.modules.push((name, "standard".into(), source.clone()));
+                            e.current = e.modules.len() - 1;
+                            e.text = source;
+                            e.dirty = false;
+                            e.new_module.clear();
+                        }
+                        Err(err) => e.error = Some(err),
+                    }
+                }
+                let standard = e.modules.get(e.current).is_some_and(|(_, k, _)| k == "standard");
+                if ui.add_enabled(standard, egui::Button::new("Remove Module")).clicked()
+                    && let Some((name, _, _)) = e.modules.get(e.current).cloned()
+                {
+                    match app.run("developer.deleteModule", json!({"name": name})) {
+                        Ok(_) => {
+                            e.modules.remove(e.current);
+                            e.current = 0;
+                            e.text = e.modules.first().map(|(_, _, s)| s.clone()).unwrap_or_default();
+                            e.dirty = false;
+                        }
+                        Err(err) => e.error = Some(err),
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(language());
+                });
+            });
+            if let Some(err) = &e.error {
+                ui.label(RichText::new(err).color(ui.visuals().error_fg_color));
+            }
+            ui.separator();
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(170.0);
+                    ui.weak("Modules");
+                    if e.modules.is_empty() {
+                        ui.weak("No code yet: Insert Module.");
+                    }
+                    let mut pick = None;
+                    for (i, (name, kind, _)) in e.modules.iter().enumerate() {
+                        let label = if kind == "standard" { name.clone() } else { format!("{name} ({kind})") };
+                        if ui.selectable_label(i == e.current, label).clicked() {
+                            pick = Some(i);
+                        }
+                    }
+                    if let Some(i) = pick
+                        && i != e.current
+                    {
+                        if let Some(m) = e.modules.get_mut(e.current)
+                            && e.dirty
+                        {
+                            // Unsaved text stays with its module until saved or closed.
+                            m.2 = e.text.clone();
+                        }
+                        e.current = i;
+                        e.text = e.modules.get(i).map(|(_, _, s)| s.clone()).unwrap_or_default();
+                    }
+                });
+                ui.separator();
+                egui::ScrollArea::both().id_salt("dev_code").show(ui, |ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::multiline(&mut e.text)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(24)
+                            .lock_focus(true)
+                            .interactive(!e.modules.is_empty()),
+                    );
+                    if resp.changed() {
+                        e.dirty = true;
+                    }
+                });
+            });
+        });
+    if open {
+        app.addins.editor = Some(e);
+    }
+}
+
+fn security_window(app: &mut SlideApp, ctx: &egui::Context) {
+    if !app.addins.security {
+        return;
+    }
+    let mut open = true;
+    let level = app.session.prefs.macro_security.clone();
+    egui::Window::new("Macro Security").id(egui::Id::new("dev_security")).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+        for (value, text) in [
+            ("disable", "Disable all macros"),
+            ("prompt", "Disable macros with notification (enable them per presentation)"),
+            ("enable", "Enable all macros (not recommended: a macro is a program)"),
+        ] {
+            if ui.radio(level == value, text).clicked() {
+                let _ = app.run("developer.macroSecurity", json!({"level": value}));
+            }
+        }
+        ui.add_space(6.0);
+        if ui.button("Close").clicked() {
+            app.addins.security = false;
+        }
+    });
+    if !open {
+        app.addins.security = false;
+    }
+}
+
+// ---------------------------------------------------------------- the Add-ins window
+
+/// Starts downloading the add-in at `url` (after the user confirmed).
+fn start_install(app: &mut SlideApp, url: &str) {
+    let url = url.trim().to_string();
+    let st = &mut app.addins.install;
+    st.confirming = None;
+    let Some(root) = plugin::install::install_dir() else {
+        st.outcome = Some(Err("There's no add-ins folder to install into.".into()));
+        return;
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("addin-install".into()).spawn(move || {
+            let _ = tx.send(plugin::install::from_github(&url, &root));
+        });
+        match spawned {
+            Ok(_) => {
+                st.pending = Some(rx);
+                st.outcome = None;
+            }
+            Err(e) => st.outcome = Some(Err(format!("Couldn't start the download: {e}"))),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (url, root);
+        st.outcome = Some(Err("Add-ins need the desktop app.".into()));
+    }
+}
+
+/// Picks up a finished download and loads the add-in.
+fn poll_install(app: &mut SlideApp, ctx: &egui::Context) {
+    let Some(rx) = &app.addins.install.pending else { return };
+    let result = match rx.try_recv() {
+        Ok(r) => r,
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            return;
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the download stopped unexpectedly".into()),
+    };
+    app.addins.install.pending = None;
+    let outcome = result.and_then(|dir| app.run("plugins.load", json!({"path": dir}))).map(|info| {
+        let name = info.get("name").and_then(Json::as_str).unwrap_or("The add-in");
+        let version = info.get("version").and_then(Json::as_str).unwrap_or("");
+        format!("Installed {name} {version}").trim_end().to_string()
+    });
+    if outcome.is_ok() {
+        app.addins.install.url.clear();
+    }
+    app.addins.install.outcome = Some(outcome);
+}
+
+fn addins_window(app: &mut SlideApp, ctx: &egui::Context) {
+    if !app.addins.window {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Add-ins").id(egui::Id::new("addins")).collapsible(false).resizable(true).default_width(560.0).open(&mut open).show(
+        ctx,
+        |ui| {
+            ui.weak("Add-ins are programs that add commands, panes and macros. They use the same manifest as the other craft apps.");
+            install_row(app, ui);
+            ui.horizontal(|ui| {
+                ui.label("Load from a folder:");
+                ui.add(egui::TextEdit::singleline(&mut app.addins.load_path).hint_text("/path/to/add-in").desired_width(300.0));
+                if ui.add_enabled(!app.addins.load_path.trim().is_empty(), egui::Button::new("Load")).clicked() {
+                    let path = app.addins.load_path.trim().to_string();
+                    if app.run("plugins.load", json!({"path": path})).is_ok() {
+                        app.addins.load_path.clear();
+                    }
+                }
+            });
+            ui.separator();
+            let all = plugin::list();
+            if all.is_empty() {
+                ui.weak("No add-ins are loaded.");
+            }
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for p in all {
+                    card(app, ui, &p);
+                }
+            });
+        },
+    );
+    if !open {
+        app.addins.window = false;
+    }
+}
+
+/// "Install from GitHub": an address field, a confirmation naming the repository, progress and
+/// the outcome.
+fn install_row(app: &mut SlideApp, ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        ui.label("Install from GitHub:");
+        let busy = app.addins.install.pending.is_some();
+        let field = egui::TextEdit::singleline(&mut app.addins.install.url).hint_text("https://github.com/owner/repository").desired_width(300.0);
+        let resp = ui.add_enabled(!busy, field);
+        let go = ui.add_enabled(!busy && !app.addins.install.url.trim().is_empty(), egui::Button::new("Install")).clicked()
+            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !app.addins.install.url.trim().is_empty());
+        if go {
+            match plugin::install::parse_github_url(&app.addins.install.url) {
+                Ok(r) => app.addins.install.confirming = Some(format!("{}/{}", r.owner, r.name)),
+                Err(e) => app.addins.install.outcome = Some(Err(e)),
+            }
+        }
+        if busy {
+            ui.spinner();
+            ui.label("Installing…");
+        }
+    });
+    if let Some(repo) = app.addins.install.confirming.clone() {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(format!(
+                "An add-in is a program that runs with your permissions. Install it only if you trust its author. Install and run github.com/{repo}?"
+            ));
+            ui.horizontal(|ui| {
+                if ui.button("Install").clicked() {
+                    let url = app.addins.install.url.clone();
+                    start_install(app, &url);
+                }
+                if ui.button("Cancel").clicked() {
+                    app.addins.install.confirming = None;
+                }
+            });
+        });
+    }
+    match &app.addins.install.outcome {
+        Some(Ok(m)) => {
+            ui.label(RichText::new(m).color(crate::theme::Tokens::get(ui.ctx()).accent));
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+        }
+        None => {}
+    }
+}
+
+/// One add-in: name and version, status, author, id and where it came from, the description,
+/// and Documentation / Activate or Deactivate / Unload.
+fn card(app: &mut SlideApp, ui: &mut Ui, p: &plugin::Plugin) {
+    let m = &p.manifest;
+    let on = p.enabled();
+    egui::Frame::group(ui.style()).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(format!("{} {}", m.name, m.version).trim_end().to_string()).strong());
+                let status = p.status();
+                let mut about = vec![match status.as_str() {
+                    "off" => "Inactive".to_string(),
+                    s if s.starts_with("failed") => s.to_string(),
+                    _ => "Active".to_string(),
+                }];
+                if m.office.is_some() {
+                    about.push("Office add-in".into());
+                } else if let Some(l) = &m.macros {
+                    about.push(format!("runs {} macros", l.language));
+                }
+                if !m.author.is_empty() {
+                    about.push(m.author.clone());
+                }
+                about.push(m.id.clone());
+                if let Some(repo) = p.source.as_ref().and_then(|s| s.get("repository")).and_then(Json::as_str) {
+                    about.push(repo.trim_start_matches("https://").to_string());
+                }
+                ui.weak(about.join(" · "));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Unload").on_hover_text("Until the next start").clicked() {
+                    let _ = app.run("plugins.unload", json!({"id": m.id}));
+                }
+                if ui.button(if on { "Deactivate" } else { "Activate" }).clicked() {
+                    let _ = app.run("plugins.setEnabled", json!({"id": m.id, "enabled": !on}));
+                }
+                if !m.homepage.trim().is_empty() && ui.link("Documentation").on_hover_text(m.homepage.trim()).clicked() {
+                    let _ = app.run("plugins.openHomepage", json!({"id": m.id}));
+                }
+            });
+        });
+        if !m.description.is_empty() {
+            ui.add(egui::Label::new(&m.description).wrap());
+        }
+    });
+}
+
+#[cfg(test)]
+#[path = "addins_tests.rs"]
+mod tests;

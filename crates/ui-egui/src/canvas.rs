@@ -695,5 +695,12 @@ fn context_menu(app: &mut SlideApp, resp: &egui::Response) {
                 ui.close();
             }
         }
+        // The add-ins' items: for the text being edited, the selected shapes, or the slide.
+        let kind = match app.session.active() {
+            Some(d) if d.selection.text.is_some() => deckcraft_engine::plugin::MenuKind::Text,
+            _ if has_sel => deckcraft_engine::plugin::MenuKind::Shape,
+            _ => deckcraft_engine::plugin::MenuKind::Slide,
+        };
+        crate::addins::context_items(app, ui, kind);
     });
 }

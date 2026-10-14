@@ -17,6 +17,8 @@ mod control_server;
 #[cfg(any(target_os = "windows", test))]
 mod graphics;
 mod logging;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod office_web;
 
 use deckcraft_engine::Session;
 use deckcraft_ui_egui::{Services, SlideApp};
@@ -30,8 +32,13 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.0.raw_input_hook(raw);
     }
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.0.ui(ui);
+        // Office add-ins' task panes: their web views follow the panes drawn this frame.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        office_web::flush(frame);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = frame;
     }
     fn on_exit(&mut self) {
         save_prefs(&self.0);
@@ -101,9 +108,9 @@ fn services() -> Services {
                 ),
                 "video" => d.add_filter("Video", &["mp4", "m4v", "mov", "webm", "mkv", "wmv"]),
                 _ => d
-                    .add_filter("Presentations", &["deckcraft", "pptx", "potx", "ppsx"])
+                    .add_filter("Presentations", &["deckcraft", "pptx", "potx", "ppsx", "pptm", "potm", "ppsm"])
                     .add_filter("DeckCraft", &["deckcraft"])
-                    .add_filter("PowerPoint", &["pptx", "potx", "ppsx"])
+                    .add_filter("PowerPoint", &["pptx", "potx", "ppsx", "pptm", "potm", "ppsm"])
                     .add_filter("Outline", &["txt", "md"]),
             };
             d.pick_file().map(|p| p.to_string_lossy().to_string())
@@ -119,6 +126,8 @@ fn services() -> Services {
             rgba.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
             Some(out)
         })),
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        office: Some(office_web::service()),
         // Media is mixed and clocked by the output device; `DECKCRAFT_NO_AUDIO` plays silently.
         audio_out: std::env::var_os("DECKCRAFT_NO_AUDIO")
             .is_none()
@@ -197,8 +206,22 @@ fn main() -> eframe::Result {
         "DeckCraft",
         options,
         Box::new(move |cc| {
+            // Add-ins: DECKCRAFT_PLUGIN_PATH, then `plugins` in the settings folder (where the
+            // Add-ins window installs them from GitHub). Each starts when first used.
+            let mut plugin_dirs = Vec::new();
+            if let Some(dir) = config_dir().filter(|_| std::env::var_os("DECKCRAFT_NO_PREFS").is_none()) {
+                plugin_dirs.push(dir.join("plugins"));
+                deckcraft_engine::plugin::install::set_install_dir(Some(dir.join("plugins")));
+            }
+            for (dir, r) in deckcraft_engine::plugin::autoload(&plugin_dirs) {
+                match r {
+                    Ok(id) => log::info!("add-in {id} from {}", dir.display()),
+                    Err(e) => log::warn!("add-in {}: {e}", dir.display()),
+                }
+            }
             let mut app = SlideApp::new(Session::new(), services());
             load_prefs(&mut app);
+            deckcraft_engine::cmd::plugins::apply_prefs(&app.session.prefs);
             // AutoRecover: reopen what a previous run left unsaved, then keep it current.
             if std::env::var_os("DECKCRAFT_NO_RECOVERY").is_none() {
                 app.session.recovery_dir = deckcraft_engine::recovery::default_dir();

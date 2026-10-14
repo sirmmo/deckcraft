@@ -6,6 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub mod addins;
 pub mod backstage;
 pub mod canvas;
 pub mod control;
@@ -15,6 +16,7 @@ pub mod fillui;
 pub mod icons;
 pub mod media;
 pub mod menus;
+pub mod office_pane;
 pub mod panes;
 pub mod ribbon;
 pub mod selpane;
@@ -62,6 +64,8 @@ pub struct Services {
     pub clipboard_image: Option<Box<dyn FnMut() -> Option<Vec<u8>>>>,
     /// Audio output for media playback (cpal on desktop); without one media plays silently.
     pub audio_out: Option<Box<dyn deckcraft_media::AudioOut>>,
+    /// Web views for Office add-ins' task panes (the desktop app on macOS and Windows).
+    pub office: Option<Box<dyn office_pane::OfficeHost>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +231,10 @@ pub struct SlideApp {
     pub(crate) thumb_drag: Option<(usize, usize)>,
     /// Selection pane: folded groups, renaming, drag and drop.
     pub selpane: selpane::State,
+    /// Add-ins: their windows, the Developer tab's windows, an install in progress.
+    pub addins: addins::State,
+    /// Office add-ins' task panes.
+    pub office: office_pane::Panes,
 }
 
 impl SlideApp {
@@ -267,12 +275,24 @@ impl SlideApp {
             ui_fonts: uifonts::UiFonts::default(),
             thumb_drag: None,
             selpane: selpane::State::default(),
+            addins: addins::State::default(),
+            office: office_pane::Panes::default(),
         }
     }
 
     pub fn with_control(mut self, rx: Receiver<ControlRequest>) -> Self {
         self.control_rx = Some(rx);
         self
+    }
+
+    /// Opens an Office add-in's task pane (`plugins.run` of a ShowTaskpane command).
+    pub fn open_office_pane(&mut self, plugin: &str, title: &str, url: &str, pane: Option<&str>) {
+        office_pane::open(self, plugin, title, url, pane);
+    }
+
+    /// Calls an Office add-in's function command in its hidden page.
+    pub fn run_office_function(&mut self, plugin: &str, url: &str, function: &str) {
+        office_pane::run_function(self, plugin, url, function);
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -601,7 +621,13 @@ impl SlideApp {
 
     pub fn save_as_dialog(&mut self, format: &str) {
         let name = self.session.active().map(|d| d.title()).unwrap_or_else(|| "Presentation".into());
-        let ext = if format == "pptx" { "pptx" } else { "deckcraft" };
+        // A presentation with macros is a .pptm as PowerPoint (a .pptx can't hold them).
+        let macros = self.session.active().is_some_and(|d| d.doc.has_macros());
+        let ext = match format {
+            "pptx" if macros => "pptm",
+            "pptx" => "pptx",
+            _ => "deckcraft",
+        };
         let suggested = format!("{name}.{ext}");
         if let Some(pick) = self.services.pick_save.as_mut() {
             if let Some(path) = pick(&suggested) {
@@ -661,6 +687,9 @@ impl SlideApp {
                 UiRequest::Pane { id } => self.ui.pane = Some(id),
                 UiRequest::StartShow { from } => self.start_show(from, false),
                 UiRequest::Message { text } => self.set_status(text),
+                UiRequest::OpenUrl { url } => self.pending_urls.push(url),
+                UiRequest::OfficePane { plugin, title, url, pane } => self.open_office_pane(&plugin, &title, &url, pane.as_deref()),
+                UiRequest::OfficeFunction { plugin, url, function } => self.run_office_function(&plugin, &url, &function),
                 UiRequest::PickFile { purpose } => {
                     if purpose == "saveAs" {
                         self.save_as_dialog("deckcraft");
@@ -691,9 +720,7 @@ impl SlideApp {
         let ct = deckcraft_engine::cmd::insert::content_type(name, bytes);
         let cmd = if lower.ends_with(".deckcraft")
             || lower.ends_with(".slidecraft")
-            || lower.ends_with(".pptx")
-            || lower.ends_with(".potx")
-            || lower.ends_with(".ppsx")
+            || [".pptx", ".potx", ".ppsx", ".pptm", ".potm", ".ppsm"].iter().any(|e| lower.ends_with(e))
         {
             "file.openBytes"
         } else if ct.starts_with("image/") {
@@ -935,7 +962,9 @@ impl SlideApp {
         let t0 = now_ms();
         let t = theme::Tokens::get(&ctx);
         self.tick_media(&ctx);
+        office_pane::pump(self);
         if self.show.is_some() {
+            office_pane::covered(self);
             show::ui(self, ui);
             self.perf.frame_ms = now_ms() - t0;
             return;
@@ -946,11 +975,13 @@ impl SlideApp {
         ribbon::title_bar(self, ui);
         if self.backstage.is_none() && self.session.active().is_some() {
             ribbon::show(self, ui);
+            addins::notice_bar(self, ui);
             status::status_bar(self, ui);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
             if self.backstage.is_some() {
                 // File tab: the Backstage view replaces everything below the title bar.
+                office_pane::covered(self);
                 backstage::show(self, ui);
                 return;
             }
@@ -961,6 +992,7 @@ impl SlideApp {
                 ViewMode::Sorter => sorter::show(self, ui),
                 ViewMode::NotesPage => sorter::notes_page(self, ui),
                 ViewMode::Outline | ViewMode::Normal | ViewMode::Reading => {
+                    office_pane::show(self, ui);
                     if self.ui.pane.is_some() {
                         panes::show(self, ui);
                     }
@@ -981,6 +1013,7 @@ impl SlideApp {
         toast::note_missing_fonts(self);
         toast::show(self, &ctx);
         dialogs::show(self, &ctx);
+        addins::windows(self, &ctx);
         menus::palette(self, &ctx);
         for url in std::mem::take(&mut self.pending_urls) {
             ctx.open_url(egui::OpenUrl::new_tab(url));

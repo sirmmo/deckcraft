@@ -3,6 +3,7 @@
 pub mod animation;
 pub mod arrange;
 pub mod design;
+pub mod developer;
 pub mod edit;
 pub mod file;
 pub mod format;
@@ -10,6 +11,8 @@ pub mod insert;
 pub mod inspect;
 pub mod media;
 pub mod merge;
+pub mod office;
+pub mod plugins;
 pub mod review;
 pub mod selection;
 pub mod shape;
@@ -142,6 +145,9 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(review::specs());
         v.extend(inspect::specs());
         v.extend(media::specs());
+        v.extend(plugins::specs());
+        v.extend(office::specs());
+        v.extend(developer::specs());
         v
     })
 }

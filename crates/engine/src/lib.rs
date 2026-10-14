@@ -27,6 +27,7 @@ pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
 pub use deckcraft_geom as geom;
 pub use deckcraft_media as media;
 pub use deckcraft_model as model;
+pub use deckcraft_plugin as plugin;
 pub use deckcraft_render as render;
 pub use tools::{Mods, PointerEvent, PointerKind, ToolKind};
 
@@ -173,6 +174,8 @@ pub struct DocState {
     pub missing_fonts: Vec<String>,
     /// An input method's composition in progress ([`Composition`]).
     pub composition: Option<Composition>,
+    /// The user let this presentation's macros run (Enable Content), until it closes.
+    pub macros_enabled: bool,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -192,6 +195,7 @@ impl DocState {
             title,
             missing_fonts: Vec::new(),
             composition: None,
+            macros_enabled: false,
         }
     }
     pub fn is_dirty(&self) -> bool {
@@ -251,6 +255,11 @@ pub struct Prefs {
     pub undo_limit: usize,
     /// Minutes between AutoRecover saves of unsaved presentations.
     pub recovery_minutes: f64,
+    /// Add-ins the user turned off (File › Options › Add-ins), by id.
+    pub disabled_plugins: Vec<String>,
+    /// Which presentations' macros may run: `disable`, `prompt` (once enabled for the
+    /// presentation) or `enable` (Developer › Macro Security).
+    pub macro_security: String,
 }
 
 impl Default for Prefs {
@@ -265,6 +274,8 @@ impl Default for Prefs {
             author: "Presenter".into(),
             undo_limit: 500,
             recovery_minutes: 1.0,
+            disabled_plugins: Vec::new(),
+            macro_security: "prompt".into(),
         }
     }
 }
@@ -295,6 +306,23 @@ pub enum UiRequest {
         action: String,
         shape: ShapeId,
         ms: Option<u64>,
+    },
+    /// Open a web page in the browser (an add-in's documentation).
+    OpenUrl {
+        url: String,
+    },
+    /// Open an Office add-in's task pane (`plugins.run` of a ShowTaskpane command).
+    OfficePane {
+        plugin: String,
+        title: String,
+        url: String,
+        pane: Option<String>,
+    },
+    /// Call an Office add-in's function command (ExecuteFunction) in its hidden page.
+    OfficeFunction {
+        plugin: String,
+        url: String,
+        function: String,
     },
 }
 

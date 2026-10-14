@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (3-D bevel, camera and face lighting rendered; previous: minor, IME composition and CJK interface text landed, #101; previous: minor, core-workflow alpha gate added; stage stays alpha; before that: major, first itemized gap list; full re-measure against PowerPoint for Mac 16.113.4 and the open GitHub issues) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previous: minor, 3-D bevel, camera and face lighting rendered; previous: minor, IME composition and CJK interface text landed, #101; previous: minor, core-workflow alpha gate added; stage stays alpha; before that: major, first itemized gap list; full re-measure against PowerPoint for Mac 16.113.4 and the open GitHub issues) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -84,13 +84,12 @@ Detail in [file-format-parity.md](file-format-parity.md).
   EMF/WMF that clips its drawing (EXTSELECTCLIPRGN, INTERSECTCLIPRECT) draws past its clip.
 - **Estimate:** 4–8 h (an SVG renderer through `resvg`-style crates); EMF/WMF clip regions 2–4 h.
 
-### Template, slide-show and macro variants are saved as plain `.pptx`
-- **Evidence:** `crates/pptx/src/write/mod.rs` always writes the
-  `presentationml.presentation.main+xml` content type; `.potx`/`.ppsx` open, `.pptm`/`.potm`/`.ppsm`
-  aren't recognised.
-- **Impact:** a template saved as `.potx` isn't a template to PowerPoint; macro decks can't be
-  opened even to view.
-- **Estimate:** 2–4 h (content types; keep `vbaProject.bin` untouched without running it).
+### Opening a template or a show file doesn't start a new deck or the show
+- **Evidence:** `.potx`/`.potm`/`.ppsx`/`.ppsm` open and save with their own content types (and
+  the macro-enabled kinds keep `vbaProject.bin`), but opening a template edits the template itself
+  and a show file opens in Normal view.
+- **Impact:** small: PowerPoint starts an untitled deck from a template and plays a show file.
+- **Estimate:** 1–2 h.
 
 ### No legacy `.ppt`/`.pot`/`.pps` import
 - **Evidence:** PowerPoint for Mac still opens and saves the 97–2003 binary formats
@@ -244,7 +243,13 @@ Detail in [localization-parity.md](localization-parity.md).
 
 - **8 original themes, no template gallery.** PowerPoint offers dozens of designs online and
   offline. 8–14 h for a larger original set (asset policy: our own designs only).
-- **No add-ins or VBA.** Out of scope by policy; MCP/CLI automation is the alternative.
+- **Add-ins: first version.** Out-of-process add-ins (the craft apps' shared `plugin.json`
+  manifest and protocol, installed from GitHub), Office add-ins' task panes on PowerPoint's
+  JavaScript API (PowerPointApi 1.1–1.4 subset, DeckCraft's own Office.js; macOS and Windows), and
+  VBA macros through a macro add-in (craft-vba) with the Developer tab. The owner reversed the
+  earlier "out of scope" policy on 2026-10-14 ([plugins.md](plugins.md)). Missing: Office.js
+  events, dialogs, tags and `insertSlidesFromBase64`; a Linux web view; a ribbon-buttons editor and
+  `customUI` in packages; VBA's UserForms, events and partial-text formatting. 15–30 h.
 
 ## AI features
 
@@ -256,6 +261,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Add-ins, Office add-ins and VBA macros through an add-in (the owner reversed "out of scope"); `.pptm`/`.potm`/`.ppsm` and template/show content types: that gap narrowed to opening behaviour |
 | 2026-10-13 | minor | Shape, picture and table rendering checked against PowerPoint on ~150 synthetic edge-case slides; 3-D bevels, cameras and face lighting now render approximately (gap narrowed to extrusion, rigs and the 3-D pane) |
 | 2026-10-12 | minor | IME composition in slide text and notes, and CJK interface text with real glyphs (#101): the IME gap is now Korean on the web and table-cell underlines |
 | 2026-10-12 | minor | EMF/WMF text, pattern and hatch brushes drawn; legacy OLE and ActiveX previews shown; the SVG gap keeps only EMF clip regions |
