@@ -28,6 +28,15 @@ pub const NS_A14: &str = "http://schemas.microsoft.com/office/drawing/2010/main"
 pub const RT_BASE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
 pub const RT_MEDIA: &str = "http://schemas.microsoft.com/office/2007/relationships/media";
 pub const RT_CORE: &str = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
+/// From the presentation part to its VBA project (MS-OFFMACRO2).
+pub const RT_VBA_PROJECT: &str = "http://schemas.microsoft.com/office/2006/relationships/vbaProject";
+pub const CT_VBA_PROJECT: &str = "application/vnd.ms-office.vbaProject";
+/// The VBA project's part name.
+pub const VBA_PROJECT_PART: &str = "ppt/vbaProject.bin";
+/// Largest VBA project (or part it relates to) we keep.
+pub const MAX_VBA_PART: usize = 64 * 1024 * 1024;
+/// Most parts we carry along with a VBA project.
+pub const MAX_VBA_RELATED: usize = 64;
 
 /// The files of a package, keyed by normalised part name (no leading slash, lowercase).
 pub struct Package {
@@ -105,7 +114,7 @@ impl Package {
             let (Some(id), Some(ty), Some(target)) = (r.attr("Id"), r.attr("Type"), r.attr("Target")) else { continue };
             let external = r.attr("TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("external"));
             let target = if external { target.to_string() } else { resolve(&base, target) };
-            out.items.push(Rel { id: id.to_string(), kind: ty.rsplit('/').next().unwrap_or(ty).to_string(), target, external });
+            out.items.push(Rel { id: id.to_string(), kind: ty.rsplit('/').next().unwrap_or(ty).to_string(), ty: ty.to_string(), target, external });
         }
         out
     }
@@ -134,6 +143,8 @@ pub struct Rel {
     pub id: String,
     /// Last segment of the relationship type (`slide`, `image`, `media`…).
     pub kind: String,
+    /// The full relationship type URI.
+    pub ty: String,
     /// Absolute part name for internal targets; the URL for external ones.
     pub target: String,
     pub external: bool,
@@ -319,6 +330,16 @@ impl PackageOut {
         } else if !self.defaults.iter().any(|(e, c)| *e == ext && c == content_type) {
             self.overrides.push((format!("/{name}"), content_type.to_string()));
         }
+        self.files.push((name.to_string(), data, false));
+    }
+    /// Has a part called `name` (any case) been added?
+    pub fn has(&self, name: &str) -> bool {
+        let n = norm(name);
+        self.files.iter().any(|(f, ..)| norm(f) == n)
+    }
+    /// Add a binary part with its own content type override (no extension default).
+    pub fn binary_override(&mut self, name: &str, content_type: &str, data: Vec<u8>) {
+        self.overrides.push((format!("/{name}"), content_type.to_string()));
         self.files.push((name.to_string(), data, false));
     }
     pub fn finish(self) -> Result<Vec<u8>, PptxError> {

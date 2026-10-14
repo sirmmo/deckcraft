@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod anim;
+pub mod b64;
 pub mod chart;
 pub mod defaults;
 pub mod edit;
@@ -846,6 +847,27 @@ pub struct Presentation {
     /// Unmodelled presentation-level XML kept for round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_ext: Option<String>,
+    /// VBA macro project (`ppt/vbaProject.bin` of a `.pptm`/`.potm`/`.ppsm`), carried through
+    /// unchanged: DeckCraft never parses or runs it, it keeps it so that saving a macro-enabled
+    /// presentation never destroys its macros. base64 in JSON. `None` = no macros.
+    #[serde(default, with = "b64::opt_arc", skip_serializing_if = "Option::is_none")]
+    pub vba_project: Option<Arc<Vec<u8>>>,
+    /// The parts the VBA project relates to (its signatures, VBA data…), byte for byte.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vba_parts: Vec<VbaPart>,
+}
+
+/// A part a VBA project relates to (`vbaProjectSignature.bin`, `vbaData.xml`…), kept verbatim.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct VbaPart {
+    /// Full relationship type URI from the project to this part.
+    pub rel_type: String,
+    /// Part name in the package, without the leading slash (`ppt/vbaProjectSignature.bin`).
+    pub name: String,
+    pub content_type: String,
+    #[serde(with = "b64::arc")]
+    pub data: Arc<Vec<u8>>,
 }
 
 impl Default for Presentation {
@@ -879,6 +901,10 @@ impl Presentation {
             m = m.max(md.id.0);
         }
         self.next_id = m;
+    }
+    /// Does the presentation carry a VBA macro project?
+    pub fn has_macros(&self) -> bool {
+        self.vba_project.as_ref().is_some_and(|b| !b.is_empty())
     }
     pub fn slide_index(&self, id: SlideId) -> Option<usize> {
         self.slides.iter().position(|s| s.id == id)

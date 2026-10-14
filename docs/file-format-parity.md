@@ -1,6 +1,6 @@
 # File-format parity with PowerPoint
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** trivial (Groups with a small legacy child coordinate space draw outlines, dashes, arrowheads and ink at their own width (#233); previously major: created; formats taken from PowerPoint 16.113.4's Info.plist, PPTX coverage measured from `crates/pptx`) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (Macro-enabled `.pptm` / `.potm` / `.ppsm` open and save, keeping the VBA project and its signatures byte for byte; `.potx` / `.ppsx` written with their own content types; previously major: created; formats taken from PowerPoint 16.113.4's Info.plist, PPTX coverage measured from `crates/pptx`) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every format PowerPoint reads or writes, DeckCraft's support, fidelity and how it is tested.
 Gaps are itemized in [gaps.md](gaps.md#file-formats). Dimension score: **~58% ready**
@@ -17,9 +17,11 @@ PowerPoint opens and saves; Viewer = opens only).
 | Format | PowerPoint | DeckCraft read | DeckCraft write | Fidelity / notes | Tested by |
 |---|---|---|---|---|---|
 | `.pptx` presentation | Editor | yes | yes | Broad (see below); never measured on real decks | `crates/pptx/tests/roundtrip.rs`, `sample.rs`, `malformed.rs`, `sniff.rs` (30 tests); opened in PowerPoint by hand 2026-10-06 |
-| `.potx` template | Editor | yes (as a presentation) | no: written with the `.pptx` content type | `file.saveTemplate` is Save As under another name | none |
-| `.ppsx` slide show | Editor | yes (as a presentation) | no: written as `.pptx` content | Doesn't start in show mode | none |
-| `.pptm` / `.potm` / `.ppsm` macro-enabled | Editor | no | no | Should open and keep `vbaProject.bin` without running it | none |
+| `.potx` template | Editor | yes (as a presentation) | yes (template content type) | `file.saveTemplate` is Save As under another name; opening one doesn't start a new untitled deck | `crates/pptx/tests/macros.rs`, `file::tests` |
+| `.ppsx` slide show | Editor | yes (as a presentation) | yes (slideshow content type) | Doesn't start in show mode | `crates/pptx/tests/macros.rs`, `file::tests` |
+| `.pptm` macro-enabled presentation | Editor | yes | yes | `ppt/vbaProject.bin` and the parts it relates to (signatures, VBA data) kept byte for byte in `Presentation::vba_project` / `vba_parts`, never parsed or run; also kept by `.deckcraft` (base64). Saving a deck with macros as `.pptx` writes `.pptm` instead and says so (`renamedFrom`); `.pptx` / `.potx` / `.ppsx` drop the project cleanly | `crates/pptx/tests/macros.rs` (9 tests: per-kind round trip and content types, clean drop, hostile packages), `file::tests` (5) |
+| `.potm` macro-enabled template | Editor | yes (as a presentation) | yes | As `.pptm`; a `.potx` with macros saves as `.potm` | as `.pptm` |
+| `.ppsm` macro-enabled show | Editor | yes (as a presentation) | yes | As `.pptm`; a `.ppsx` with macros saves as `.ppsm`. Doesn't start in show mode | as `.pptm` |
 | `.ppt` / `.pot` / `.pps` 97–2003 binary | Editor | no | no | Owner decision; import only would be enough | none |
 | `.odp` OpenDocument | Editor | no | no | | none |
 | `.thmx` Office theme | Viewer | no | no | Browse for themes is a P2 row | none |
@@ -83,7 +85,7 @@ the round trip even though DeckCraft doesn't model it.
 | Comments: legacy | yes | yes | |
 | Comments: modern threaded (`p188`) | yes | no (written as legacy) | Replies and resolved state lost (#70) |
 | Unknown slide-level elements (`graphicFrame` OLE, extensions, `mc:AlternateContent`) | kept | kept | Rendered as a labelled placeholder with the preview picture when present |
-| Tags, custom XML, VBA | no / no / no | | |
+| Tags, custom XML, VBA | no / no / kept | no / no / kept (`.pptm`/`.potm`/`.ppsm` only) | VBA project and related parts are opaque bytes; capped at 64 MiB per part, 64 related parts |
 | Embedded fonts | no | no | |
 | Encryption (password to open) | no | no | |
 
@@ -99,6 +101,7 @@ the round trip even though DeckCraft doesn't model it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | `.pptm` / `.potm` / `.ppsm` read and written with the VBA project (and its signature/data parts) carried byte for byte; macro-free kinds drop it cleanly; a deck with macros saved as `.pptx`/`.potx`/`.ppsx` becomes `.pptm`/`.potm`/`.ppsm`; `.potx` and `.ppsx` now get their own content types |
 | 2026-10-12 | minor | EMF/WMF text and pattern brushes drawn; OLE (VML) and ActiveX previews read |
 | 2026-10-12 | minor | Text warps rendered; their adjust values read and written |
 | 2026-10-12 | trivial | Groups with a small legacy child coordinate space draw outlines, dashes, arrowheads and ink at their own width (#233) |

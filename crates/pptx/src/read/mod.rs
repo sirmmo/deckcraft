@@ -397,6 +397,9 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, PptxError> {
         p.props.company = d.root.child("Company").map(|c| c.text()).unwrap_or_default();
     }
 
+    // Macros (a .pptm/.potm/.ppsm): kept as opaque bytes.
+    crate::vba::read(&pkg, &pres_part.rels, &mut p);
+
     inherit_placeholder_geometry(&mut p);
     p.header_footer = header_footer(&p);
     p.media = std::mem::take(&mut imp.media);
