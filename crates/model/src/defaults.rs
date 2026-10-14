@@ -513,18 +513,26 @@ pub fn blank_presentation(size: Size, theme: Theme, title_slide: bool) -> Presen
         next_id: next.max(256),
         embedded_fonts: vec![],
         table_styles: vec![],
+        tags: vec![],
+        kept_parts: vec![],
+        guides: vec![],
         raw_ext: None,
     };
     if title_slide {
-        let s = new_slide(&mut p, first_layout);
-        p.slides.push(Arc::new(s));
+        // A fresh deck starts at id 256 and this builds a handful of ids, so the slide always
+        // fits; should that ever stop holding, the deck arrives without its title slide rather
+        // than with a duplicated id.
+        if let Some(s) = new_slide(&mut p, first_layout) {
+            p.slides.push(Arc::new(s));
+        }
     }
     p
 }
 
-/// A slide for `layout` with its placeholders instantiated (empty, inheriting position).
-pub fn new_slide(p: &mut Presentation, layout: LayoutId) -> Slide {
-    let id = SlideId(p.alloc_id());
+/// A slide for `layout` with its placeholders instantiated (empty, inheriting position). `None`
+/// when the deck has used every object id and cannot grow (#407).
+pub fn new_slide(p: &mut Presentation, layout: LayoutId) -> Option<Slide> {
+    let id = SlideId(p.alloc_id()?);
     let mut shapes = vec![];
     let lay_shapes: Vec<Shape> = p.layout(layout).map(|(_, l)| l.shapes.clone()).unwrap_or_default();
     for ls in lay_shapes {
@@ -532,7 +540,7 @@ pub fn new_slide(p: &mut Presentation, layout: LayoutId) -> Slide {
         if ph.kind.is_footer_kind() {
             continue;
         }
-        let sid = ShapeId(p.alloc_id());
+        let sid = ShapeId(p.alloc_id()?);
         shapes.push(Shape {
             id: sid,
             name: ls.name.clone(),
@@ -543,7 +551,7 @@ pub fn new_slide(p: &mut Presentation, layout: LayoutId) -> Slide {
             ..Default::default()
         });
     }
-    Slide { id, layout, shapes, ..Default::default() }
+    Some(Slide { id, layout, shapes, ..Default::default() })
 }
 
 /// Layout for a kind in the first master.

@@ -224,7 +224,7 @@ fn edges(sizes: &[f64]) -> Vec<f64> {
 }
 
 /// A cell's text as drawn: its margins, anchor and direction, plus the table style's text colour and bold.
-pub(crate) fn cell_body(rctx: &Ctx, t: &Table, r: usize, c: usize, cell: &Cell) -> TextBody {
+pub fn cell_body(rctx: &Ctx, t: &Table, r: usize, c: usize, cell: &Cell) -> TextBody {
     let lk = look(rctx, t, r, c);
     let mut body = cell.text.clone();
     let [ml, mr, mt, mb] = cell.margins.unwrap_or([7.2, 7.2, 3.6, 3.6]);
@@ -295,6 +295,25 @@ pub fn cell_rects(t: &Table, heights: &[f64]) -> Vec<(usize, usize, Rect)> {
         }
     }
     out
+}
+
+/// Can a cell's text be left undrawn because it lands wholly outside the `target` (pixels)? Only
+/// for cells whose text stays inside the cell: its row grew to fit it (one row, horizontal text,
+/// not at the height cap), so nothing overflows. A margin covers italic overhang and the like.
+/// A table of thousands of rows otherwise lays out every cell's text off the slide's bottom.
+fn text_off_target(cell: &Cell, rect: Rect, m: Affine, target: (u16, u16)) -> bool {
+    if cell.row_span > 1 || !matches!(cell.vertical, None | Some(TextDir::Horizontal)) || rect.height() >= 20_000.0 {
+        return false;
+    }
+    let b = m.transform_rect_bbox(rect).inflate(64.0, 64.0);
+    let view = Rect::new(0.0, 0.0, f64::from(target.0), f64::from(target.1));
+    b.is_finite() && (b.x1 < view.x0 || b.y1 < view.y0 || b.x0 > view.x1 || b.y0 > view.y1)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Cells whose text `draw` laid out on this thread (tests check off-slide cells are skipped).
+    pub(crate) static TEXT_CELLS_DRAWN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Draws the table; returns the box its cells cover (table space), which grows with their text.
@@ -399,11 +418,13 @@ pub fn draw(
     // Text.
     for (r, c, rect) in &rects {
         let Some(cell) = t.cell(*r, *c) else { continue };
-        if cell.text.is_empty() {
+        if cell.text.is_empty() || text_off_target(cell, *rect, m, (ctx.width(), ctx.height())) {
             continue;
         }
         let body = cell_body(rctx, t, *r, *c, cell);
         let tmp = Shape { text: Some(body.clone()), ..Default::default() };
+        #[cfg(test)]
+        TEXT_CELLS_DRAWN.with(|n| n.set(n.get() + 1));
         crate::draw_text(ctx, rctx, &tmp, &body, *rect, m, fields, None);
         let _ = peniko::Fill::NonZero;
     }

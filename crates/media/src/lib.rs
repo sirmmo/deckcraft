@@ -19,6 +19,7 @@
 pub mod audio;
 pub mod clip;
 pub mod feed;
+mod mp4guard;
 pub mod player;
 pub mod probe;
 pub mod video;
