@@ -75,7 +75,7 @@ JSON-RPC 2.0, one message per line on the add-in's standard input and output.
   version as text (`"2.0"`, what `requires.protocol` is checked against), and `addins` lists every
   installed add-in as `{id, version, enabled}` (`enabled`: turned on, not blocked and not failed),
   so an add-in can adapt to the optional ones it found.
-  The environment also has `CRAFT_HOST=deckcraft` and `CRAFT_PLUGIN_DIR`.
+  The environment also has `CRAFT_HOST=deckcraft`, `CRAFT_PLUGIN_DIR` (also as `DECKCRAFT_PLUGIN_DIR`) and `DECKCRAFT_VERSION`.
 - `commands/run {command, params, context}` → `{commands: [{command, params}], message?, result?}`.
   `context` is `{document, presentation, slide (0-based), slideId, slides, titles: [slide titles], selection: [shape ids], text}`.
   The answered commands are DeckCraft's own (`slide.new`, `insert.textBox`, `shape.fill`…; not
