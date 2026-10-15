@@ -191,6 +191,11 @@ pub fn run_command(app: &mut SlideApp, plugin: &str, command: &str, params: Json
     if let Some(d) = r.get("dialog").and_then(|d| serde_json::from_value::<plugin::Dialog>(d.clone()).ok()) {
         app.addins.dialog = Some(PluginDialog::new(plugin, d));
     }
+    // Protocol 2: a transport's command answered with a room to join or start.
+    if let Err(e) = crate::collab_ui::join_from_plugin(app, plugin, &r) {
+        app.set_status(e.clone());
+        return Err(e);
+    }
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 # Add-ins, Office add-ins and macros
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** patch (events refuse `host/sync` and the VBA project, reads too; no-op commands are no edit; previously minor: protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (protocol 2: the push channel and co-editing transports; previously patch: events refuse `host/sync` and the VBA project, reads too; no-op commands are no edit; previously minor: protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 DeckCraft runs three kinds of extension, all as **add-ins** listed in the Add-ins window (Insert ›
 Add-ins, Developer › Add-ins):
@@ -45,15 +45,17 @@ reads:
 | `ui` / `uiFor.deckcraft` | Ribbon groups (`tab`: Home, Insert, Draw, Design, Transitions, Animations, Slide Show, Record, Review, View, or a new tab) and right-click items (`menu`: `shape`, `slide`, `text`) |
 | `macros` | `{language}`: the add-in runs macros (protocol 1.1) |
 | `events` | `["documentOpened", "documentSaved", "documentClosed"]`: the document events it hears (protocol 1.2); other names are kept and ignored |
+| `collab` | `{transport, label}`: the add-in is a co-editing transport (protocol 2); only such an add-in may join rooms, and the Share window lists it by `label` |
 | `functions` | GridCraft's spreadsheet functions: accepted, not used |
 
 ## The protocol
 
 JSON-RPC 2.0, one message per line on the add-in's standard input and output.
 
-- `initialize {protocolVersion: 1, host: {id: "deckcraft", name, version, features, language}, plugin: {id, dir}}`.
-  `features` is `["dialogs", "open", "events", "document"]` (protocol 1.2), `language` the UI's
-  BCP 47 tag (`en`: DeckCraft's interface is English).
+- `initialize {protocolVersion: 1, host: {id: "deckcraft", name, version, features, language, collab}, plugin: {id, dir}}`.
+  `features` is `["dialogs", "open", "events", "document", "push", "collab"]` (protocols 1.2 and
+  2), `language` the UI's BCP 47 tag (`en`: DeckCraft's interface is English), `collab` what
+  co-editing DeckCraft speaks (protocol 2, below).
   The environment also has `CRAFT_HOST=deckcraft` and `CRAFT_PLUGIN_DIR`.
 - `commands/run {command, params, context}` → `{commands: [{command, params}], message?, result?}`.
   `context` is `{document, presentation, slide (0-based), slideId, slides, titles: [slide titles], selection: [shape ids], text}`.
@@ -156,6 +158,35 @@ once the user clicked **Enable Content** in the bar a presentation with macros o
 `.pptx`, `.potx` or `.ppsx` name is saved as `.pptm`, `.potm` or `.ppsm` instead, and DeckCraft says
 so; the asked file isn't written.
 
+## Protocol 2: the push channel and co-editing
+
+[Craft plugin protocol 2](https://github.com/sirmmo/craft-collab/blob/main/docs/protocol-2.md)
+(2.0.1, shared with GridCraft and WordCraft) adds to 1, 1.1 and 1.2 and changes nothing in them:
+
+- **The push channel.** DeckCraft reads every running add-in's output all the time. An add-in may
+  send notifications whenever it likes, and requests to the *anytime* methods (`collab/snapshot`,
+  `host/log`); DeckCraft answers them in its main loop, in any order, and may send the add-in
+  notifications interleaved with its own requests, so an add-in must match answers by `id`. The
+  protocol-1 rules hold for DeckCraft's requests; `host/…` requests during one of them are still
+  answered by it. A line may be 64 MiB; more than 1,000 messages a second for 5 s and the add-in is
+  stopped. `initialize` gets `host.features` `"push"` and `"collab"` and
+  `host.collab = {formats: ["yjs-v1"], app: "deckcraft", schema: 1, encryption: ["aes-256-gcm"]}`.
+- **Transports.** An add-in whose manifest has `"collab": {"transport": "mqtt", "label": "Live
+  (MQTT)"}` may join rooms; it runs while it's in one. Its command answers `{"collab": {"join":
+  {room, mode, user, role?, key?, path?, title?}}}` (alongside `message`, `dialog`, `open`, and
+  `result.link`, an invitation); `plugins.run` returns it, and when DeckCraft's own interface ran
+  the command (a button, a menu item, an add-in's dialog, the Share window) it runs `collab.join`
+  with it and keeps the link for **Copy invitation**. Then the `collab/*` messages flow:
+  `collab/joined`, `sync1`/`sync2`/`update`/`awareness` (Yjs, base64, encrypted when keyed),
+  `collab/status`, `collab/leave`, `collab/snapshot` (with `file: true`, the presentation as
+  `.pptx` bytes, refused in an encrypted room).
+- The Share window runs a transport's own `share` and `join` commands when it has them, with
+  `{name, color, encrypt}`.
+
+DeckCraft's shared document (schema 1), commands and behaviour: [collab.md](collab.md). A test
+transport that relays between two rooms is `crates/engine/tests/collab_push.rs`;
+[craft-collab](https://github.com/sirmmo/craft-collab) has MQTT and loopback transports.
+
 ## Office add-ins
 
 An Office add-in's `manifest.xml` (with `<Host Name="Presentation"/>` and `https://` pages) becomes
@@ -210,6 +241,7 @@ A macro is one undo step; a run-time error takes everything it did back
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Protocol 2: the push channel (add-ins speak any time; `host.features` `push`, `collab`; `host.collab`), manifest `collab` (transports), `collab.join` in command results; co-editing in [collab.md](collab.md) |
 | 2026-10-15 | patch | Aligned with GridCraft and WordCraft: during document events `host/sync` and `host/vbaProject/*` are refused, reads too; a command that changes nothing makes no undo step |
 | 2026-10-15 | minor | Protocol 1.2: `host.features` and `host.language`, `context.document`, command results `open` and `dialog` (host-drawn list, form and message dialogs that chain), manifest `events` and `events/documentOpened`, `documentSaved`, `documentClosed` |
 | 2026-10-15 | minor | Ribbon buttons that run macros (`customUI14.xml`, `macros/run` gets `control`); Record Macro and `developer.recordToCode` (`macros/record`), a DeckCraft extra |

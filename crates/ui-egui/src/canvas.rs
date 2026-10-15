@@ -925,6 +925,8 @@ fn overlays(app: &mut SlideApp, ui: &Ui, painter: &egui::Painter, xf: Xf, t: &To
             .map(|q| xf.to_screen(f.affine * q));
         poly(painter, pts, Stroke::new(2.0, t.accent));
     }
+    // Others in a live session: their selections, carets and recent edits.
+    crate::collab_ui::paint_remote(app, painter, xf);
     // Smart guides, marquee, previews.
     for g in &app.session.tool.guides {
         let (a, b) =

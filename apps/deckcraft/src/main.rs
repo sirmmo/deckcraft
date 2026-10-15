@@ -267,6 +267,8 @@ fn main() -> eframe::Result {
             // AutoRecover: reopen what a previous run left unsaved, then keep it current.
             if std::env::var_os("DECKCRAFT_NO_RECOVERY").is_none() {
                 app.session.recovery_dir = deckcraft_engine::recovery::default_dir();
+                // Live sessions keep their room's state beside it, so a crash and rejoin merges.
+                app.session.collab.recovery_dir = deckcraft_engine::recovery::default_dir().map(|d| d.join("rooms"));
                 if let Ok(v) = app.session.execute("file.recovery.open", &serde_json::json!({}))
                     && let Some(n) = v.get("opened").and_then(|o| o.as_array()).map(Vec::len).filter(|n| *n > 0)
                 {

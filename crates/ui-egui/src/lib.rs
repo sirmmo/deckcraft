@@ -10,6 +10,7 @@ pub mod addins;
 pub mod animtimeline;
 pub mod backstage;
 pub mod canvas;
+pub mod collab_ui;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
@@ -500,6 +501,8 @@ pub struct SlideApp {
     pub selpane: selpane::State,
     /// Add-ins: their windows, the Developer tab's windows, an install in progress.
     pub addins: addins::State,
+    /// Live sessions: the Share window and the session popover ([`collab_ui`]).
+    pub collab: collab_ui::State,
     /// Office add-ins' task panes.
     pub office: office_pane::Panes,
     /// View › New Window: a second window on one presentation. `None` when it is closed.
@@ -579,6 +582,7 @@ impl SlideApp {
             thumb_drag: None,
             selpane: selpane::State::default(),
             addins: addins::State::default(),
+            collab: collab_ui::State::default(),
             office: office_pane::Panes::default(),
             doc_window: None,
             sorter: sorter::State::default(),
@@ -604,6 +608,11 @@ impl SlideApp {
     /// Calls an Office add-in's function command in its hidden page.
     pub fn run_office_function(&mut self, plugin: &str, url: &str, function: &str) {
         office_pane::run_function(self, plugin, url, function);
+    }
+
+    /// Puts text on the system clipboard (at the end of the frame).
+    pub fn copy_text(&mut self, text: String) {
+        self.pending_copy = Some(text);
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -1332,6 +1341,8 @@ impl SlideApp {
     fn drain_requests(&mut self) {
         for r in std::mem::take(&mut self.session.ui_requests) {
             match r {
+                // Share (`collab.share` / `collab.join` with no params): the Share window.
+                UiRequest::Dialog { id, .. } if id == "collabShare" => collab_ui::open_share(self),
                 UiRequest::Dialog { id, params } => {
                     let mut d = dialogs::Dialog::new(&id);
                     d.params = params;
@@ -1842,6 +1853,7 @@ impl SlideApp {
         let t0 = now_ms();
         let t = theme::Tokens::get(&ctx);
         self.tick_media(&ctx);
+        collab_ui::pump(self, &ctx);
         office_pane::pump(self);
         eyedropper::tick(self, &ctx);
         self.opening_ui(&ctx);
@@ -1902,6 +1914,7 @@ impl SlideApp {
         toast::show(self, &ctx);
         dialogs::show(self, &ctx);
         addins::windows(self, &ctx);
+        collab_ui::windows(self, &ctx);
         menus::palette(self, &ctx);
         for url in std::mem::take(&mut self.pending_urls) {
             ctx.open_url(egui::OpenUrl::new_tab(url));
@@ -2078,6 +2091,8 @@ fn js_now() -> f64 {
 mod animpane_tests;
 #[cfg(test)]
 mod browsetheme_tests;
+#[cfg(test)]
+mod collab_tests;
 #[cfg(test)]
 mod compare_tests;
 #[cfg(test)]
