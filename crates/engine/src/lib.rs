@@ -11,6 +11,7 @@ pub mod cmd;
 pub mod compare;
 pub mod connect;
 pub mod drawtable;
+pub mod events;
 pub mod file_access;
 pub mod fonts;
 pub mod gif_export;
@@ -225,6 +226,9 @@ pub struct DocState {
     pub macros_enabled: bool,
     /// Review › Compare in progress: the revised copy.
     pub compare: Option<compare::Compare>,
+    /// Where the document came from, in words, when an add-in opened it (`open.label`, protocol
+    /// 1.2: "Nextcloud · Documents/Budget.pptx"); File › Info shows it as the location.
+    pub location_label: Option<String>,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -253,6 +257,7 @@ impl DocState {
             composition: None,
             macros_enabled: false,
             compare: None,
+            location_label: None,
         }
     }
     pub fn is_dirty(&self) -> bool {
@@ -507,6 +512,8 @@ pub struct Session {
     /// Presentations a host read off the UI thread, waiting for `file.adopt` (by token).
     loaded: Vec<(u64, cmd::file::LoadedFile)>,
     next_loaded: u64,
+    /// Document events for add-ins, waiting for the outermost command to finish ([`events`]).
+    pub(crate) events: events::Events,
 }
 
 impl Default for Session {
@@ -539,6 +546,7 @@ impl Session {
             panics_caught: 0,
             loaded: vec![],
             next_loaded: 0,
+            events: Default::default(),
         }
     }
     /// Hand over a presentation read on another thread ([`cmd::file::read_presentation_file`]);
@@ -609,7 +617,12 @@ impl Session {
     /// Run command `id`. A panic inside it becomes [`EngineError::Internal`] and leaves the
     /// presentation as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
-        self.guarded(id, |s| s.execute_unguarded(id, params))
+        let r = self.guarded(id, |s| s.execute_unguarded(id, params));
+        // Add-ins hear about opens, saves and closes once the outermost command is done.
+        if self.depth == 0 {
+            self.flush_events();
+        }
+        r
     }
 
     fn execute_unguarded(&mut self, id: &str, params: &Value) -> Result<Value> {

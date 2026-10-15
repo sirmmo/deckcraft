@@ -229,6 +229,8 @@ fn run_macro(s: &mut Session, p: &Json) -> Result<Json> {
     if let Some(c) = p.get("control").filter(|c| c.is_object()) {
         params["control"] = json!({"id": c.get("id").cloned().unwrap_or(json!("")), "tag": c.get("tag").cloned().unwrap_or(json!(""))});
     }
+    // Protocol 1.2: the macro knows which document it runs on.
+    params["context"] = super::plugins::macro_context(s);
     call(s, &plugin, "macros/run", params)?;
     Ok(json!({"ran": name}))
 }

@@ -17,6 +17,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+pub mod dialog;
 pub mod install;
 pub mod office;
 mod process;
@@ -28,10 +29,20 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 
+pub use dialog::{Dialog, OpenRequest};
 pub use process::{Connection, HostError, HostHandler, RequestError};
 
 /// The protocol version this host speaks (sent in `initialize`).
 pub const PROTOCOL_VERSION: u32 = 1;
+/// What this host does beyond protocol 1.1, sent as `initialize`'s `host.features` (protocol 1.2):
+/// host-drawn dialogs, opening files, document events and `context.document`.
+pub const HOST_FEATURES: &[&str] = &["dialogs", "open", "events", "document"];
+/// The document events a manifest may ask for (`"events": [...]`, protocol 1.2).
+pub const EVENTS: &[&str] = &["documentOpened", "documentSaved", "documentClosed"];
+/// How long `events/documentOpened` and `events/documentSaved` may take.
+pub const EVENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long `events/documentClosed` may take (the app doesn't wait longer while quitting).
+pub const CLOSE_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// This app's id in a manifest's `apps` and `uiFor`, and in `initialize`'s `host.id`. The
 /// manifest and protocol are shared with the other craft apps (GridCraft, WordCraft), so one plugin can
 /// serve several.
@@ -88,6 +99,10 @@ pub struct Manifest {
     /// A scripting language the plugin runs macros in (protocol 1.1: `macros/*`), e.g. VBA.
     #[serde(default)]
     pub macros: Option<MacrosDecl>,
+    /// The document events the plugin hears (protocol 1.2): `documentOpened`, `documentSaved`,
+    /// `documentClosed`. Names this app doesn't send are kept and ignored.
+    #[serde(default)]
+    pub events: Vec<String>,
     /// An Office add-in (read from its `manifest.xml`): its task panes and permissions.
     #[serde(skip)]
     pub office: Option<office::OfficeInfo>,
@@ -231,7 +246,7 @@ fn valid_label(s: &str) -> bool {
     !s.trim().is_empty() && s.chars().count() <= MAX_LABEL
 }
 
-fn valid_id(s: &str) -> bool {
+pub(crate) fn valid_id(s: &str) -> bool {
     // Starts with a letter or digit: an id is also the folder an installed plugin goes in.
     s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
         && s.len() <= 128
@@ -318,6 +333,9 @@ impl Manifest {
             if !seen.insert(c.id.as_str()) {
                 return Err(format!("{MANIFEST}: command `{}` is declared twice", c.id));
             }
+        }
+        if self.events.len() > 64 || self.events.iter().any(|e| e.is_empty() || e.len() > 64) {
+            return Err(format!("{MANIFEST}: `events` holds at most 64 event names"));
         }
         let buttons: usize = self.ui.ribbon.iter().map(|g| g.buttons.len()).sum();
         if self.ui.ribbon.len() > MAX_DECLARATIONS || buttons > MAX_DECLARATIONS || self.ui.menus.len() > MAX_DECLARATIONS {
@@ -432,11 +450,7 @@ impl Plugin {
         }
         if !matches!(state, State::Running(_)) {
             let mut conn = Connection::start(&self.manifest, &self.dir)?;
-            let init = json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "host": {"id": HOST_ID, "name": "DeckCraft", "version": env!("CARGO_PKG_VERSION")},
-                "plugin": {"id": self.manifest.id, "dir": self.dir.display().to_string()},
-            });
+            let init = initialize_params(&self.manifest.id, &self.dir);
             if let Err(e) = conn.request("initialize", init, INIT_TIMEOUT) {
                 *failures += 1;
                 *state =
@@ -460,12 +474,17 @@ impl Plugin {
         }
     }
 
-    /// `ready` (not started), `running`, or `failed: …`.
+    /// Whether the plugin declared `event` in its manifest's `events`.
+    pub fn hears(&self, event: &str) -> bool {
+        self.manifest.office.is_none() && self.manifest.events.iter().any(|e| e == event)
+    }
+
     /// False once turned off with [`set_enabled`].
     pub fn enabled(&self) -> bool {
         self.enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// `ready` (not started), `running`, or `failed: …`.
     pub fn status(&self) -> String {
         if !self.enabled() {
             return "off".into();
@@ -496,6 +515,7 @@ impl Plugin {
                 "id": c.id, "label": c.label, "description": c.description, "params": c.params,
             })).collect::<Vec<_>>(),
             "ui": m.ui,
+            "events": m.events,
             "kind": if m.office.is_some() { "office" } else { "native" },
             "office": m.office.as_ref().map(|o| json!({
                 "id": o.office_id, "permissions": o.permissions, "sourceLocation": o.source_location,
@@ -509,6 +529,38 @@ impl Plugin {
         if let State::Running(conn) = std::mem::replace(&mut guard.0, State::Idle) {
             conn.shutdown();
         }
+    }
+}
+
+/// `initialize`'s params: the protocol version, the host (with its protocol 1.2 `features` and UI
+/// `language`) and the plugin.
+pub fn initialize_params(plugin_id: &str, dir: &Path) -> Json {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "host": {
+            "id": HOST_ID, "name": "DeckCraft", "version": env!("CARGO_PKG_VERSION"),
+            "features": HOST_FEATURES, "language": host_language(),
+        },
+        "plugin": {"id": plugin_id, "dir": dir.display().to_string()},
+    })
+}
+
+fn language_slot() -> &'static Mutex<String> {
+    static LANGUAGE: OnceLock<Mutex<String>> = OnceLock::new();
+    LANGUAGE.get_or_init(|| Mutex::new("en".into()))
+}
+
+/// The UI language sent as `host.language` (a BCP 47 tag; DeckCraft's interface is English: `en`).
+pub fn host_language() -> String {
+    lock(language_slot()).clone()
+}
+
+/// Sets the UI language plugins started from now on are told (`host.language`). Anything that
+/// isn't a plausible BCP 47 tag is ignored.
+pub fn set_host_language(tag: &str) {
+    let ok = !tag.is_empty() && tag.len() <= 35 && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if ok {
+        *lock(language_slot()) = tag.to_string();
     }
 }
 
@@ -640,6 +692,10 @@ pub struct CommandReply {
     pub result: Json,
     /// An Office add-in's command: what the app opens or calls (no process is involved).
     pub office: Option<office::OfficeCommand>,
+    /// A local file to open after the step (protocol 1.2).
+    pub open: Option<OpenRequest>,
+    /// A dialog to show after the step (protocol 1.2).
+    pub dialog: Option<Dialog>,
 }
 
 /// Most engine commands one plugin command may run.
@@ -695,6 +751,12 @@ fn parse_reply(r: Json) -> Result<CommandReply, String> {
         result: r.get("result").cloned().unwrap_or(Json::Null),
         ..Default::default()
     };
+    if let Some(open) = r.get("open").filter(|v| !v.is_null()) {
+        reply.open = Some(OpenRequest::parse(open)?);
+    }
+    if let Some(dialog) = r.get("dialog").filter(|v| !v.is_null()) {
+        reply.dialog = Some(Dialog::parse(dialog)?);
+    }
     if let Some(list) = r.get("commands") {
         let list = list.as_array().ok_or("`commands` must be an array")?;
         if list.len() > MAX_REPLY_COMMANDS {
@@ -706,6 +768,27 @@ fn parse_reply(r: Json) -> Result<CommandReply, String> {
         }
     }
     Ok(reply)
+}
+
+// ---------------------------------------------------------------- document events
+
+/// The loaded, enabled plugins that declared `event` (protocol 1.2), in load order.
+pub fn listeners(event: &str) -> Vec<String> {
+    list().into_iter().filter(|p| p.enabled() && p.hears(event)).map(|p| p.manifest.id.clone()).collect()
+}
+
+/// Sends `events/<event>` to one plugin, answering its `host/…` requests with `host` meanwhile:
+/// `Ok(message)` (the answer's `message`, if any) or the error. `documentClosed` times out after
+/// [`CLOSE_EVENT_TIMEOUT`], the others after [`EVENT_TIMEOUT`]; a timeout counts as a failure, as
+/// for a command.
+pub fn send_event(plugin_id: &str, event: &str, params: Json, host: &mut HostHandler<'_>) -> Result<Option<String>, String> {
+    let plugin = get(plugin_id).ok_or_else(|| format!("no plugin `{plugin_id}` is loaded"))?;
+    if !plugin.enabled() || !plugin.hears(event) {
+        return Err(format!("plugin {plugin_id} doesn't hear {event}"));
+    }
+    let timeout = if event == "documentClosed" { CLOSE_EVENT_TIMEOUT } else { EVENT_TIMEOUT };
+    let r = plugin.request_with(&format!("events/{event}"), params, timeout, host)?;
+    Ok(r.get("message").and_then(Json::as_str).filter(|m| !m.trim().is_empty()).map(|m| m.chars().take(4000).collect()))
 }
 
 #[cfg(test)]

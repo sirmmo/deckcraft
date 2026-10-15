@@ -39,7 +39,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Run Add-in Command",
             [],
             None,
-            "{plugin, command, params?} → {ran, message?, result?}. The add-in's commands run as one undoable step",
+            "{plugin, command, params?} → {ran, message?, result?, open?: {path, label?, readOnly}, dialog?}. The add-in's commands run as one undoable step; `open` and `dialog` (protocol 1.2) are for the caller to act on: the app's own buttons and menus open the file or show the dialog, a programmatic run only returns them",
             always,
             run
         ),
@@ -133,6 +133,7 @@ fn context(s: &Session) -> Json {
         Some(super::office::text_between(body, (p0, c0), (p1, c1)))
     });
     json!({
+        "document": document(d),
         "presentation": d.title(),
         "slide": d.selection.slide,
         "slideId": d.current_slide().map(|sl| sl.id.0.to_string()),
@@ -141,6 +142,44 @@ fn context(s: &Session) -> Json {
         "selection": d.selection.shapes.iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
         "text": text,
     })
+}
+
+/// `context.document` (protocol 1.2): the file the presentation was opened from or last saved to
+/// (`null` for a new one), its name, and whether it has unsaved changes.
+pub(crate) fn document(d: &crate::DocState) -> Json {
+    let name = match &d.path {
+        Some(p) => crate::events::file_name(p),
+        None => d.title(),
+    };
+    json!({"path": d.path, "name": name, "dirty": d.is_dirty()})
+}
+
+/// `context` for `macros/run`: the document (protocol 1.2).
+pub(crate) fn macro_context(s: &Session) -> Json {
+    match s.active() {
+        Some(d) => json!({"document": document(d)}),
+        None => json!({}),
+    }
+}
+
+/// Checks a reply's `open` and `dialog` before anything runs: the file must be one File › Open
+/// opens, and the dialog may only run the add-in's own commands.
+fn check_follow_up(plugin: &str, reply: &deckcraft_plugin::CommandReply) -> std::result::Result<(), String> {
+    if let Some(open) = &reply.open {
+        #[cfg(not(target_arch = "wasm32"))]
+        super::file::check_openable(&open.path).map_err(|e| format!("the add-in asked to open {e}"))?;
+        #[cfg(target_arch = "wasm32")]
+        return Err(format!("the add-in asked to open {}: the web app can't open local files", open.path));
+    }
+    if let Some(d) = &reply.dialog {
+        let manifest = deckcraft_plugin::get(plugin).map(|p| p.manifest.clone());
+        for c in d.commands() {
+            if manifest.as_ref().is_none_or(|m| m.command(c).is_none()) {
+                return Err(format!("the add-in's dialog runs `{c}`, which isn't one of its commands"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The active presentation and selection, to put back if a step fails.
@@ -192,6 +231,10 @@ fn run(s: &mut Session, p: &Json) -> Result<Json> {
         restore(s, before);
         return Err(bad(ID, format!("an add-in command can't run `{id}`")));
     }
+    if let Err(e) = check_follow_up(plugin, &reply) {
+        restore(s, before);
+        return Err(bad(ID, format!("{plugin} › {command}: {e}")));
+    }
     let mut failure = None;
     for (id, params) in &reply.commands {
         if let Err(e) = s.execute(id, params) {
@@ -212,6 +255,14 @@ fn run(s: &mut Session, p: &Json) -> Result<Json> {
     }
     if !reply.result.is_null() {
         out["result"] = reply.result;
+    }
+    // Protocol 1.2: what to do after the step, for whoever ran it (the app's buttons and menus do
+    // it; a programmatic caller gets it here).
+    if let Some(open) = reply.open {
+        out["open"] = serde_json::to_value(open).unwrap_or(Json::Null);
+    }
+    if let Some(dialog) = reply.dialog {
+        out["dialog"] = serde_json::to_value(dialog).unwrap_or(Json::Null);
     }
     Ok(out)
 }

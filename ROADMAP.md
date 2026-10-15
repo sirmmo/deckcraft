@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~20 points and ~120–210 h away
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-15 · **Change:** minor (ribbon buttons that run macros and Record Macro; previously major: add-ins, Office add-ins and VBA; Ecosystem re-scored; previously major: community PR wave 2026-10-14: ~60 landed items in the progress log, among them the Font, Paragraph, Photo Album, theme colour and font and Date and Time dialogs, presenter and show controls, the SmartArt Text Pane and PPTX corpus slices; breadth 84% after `cargo xtask parity`, ready stays ~55%, stage stays alpha; duplicated rows and headers folded; previous: minor, hours to ~95% per audience added) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (add-in protocol 1.2; previously minor: ribbon buttons that run macros and Record Macro; previously major: add-ins, Office add-ins and VBA; Ecosystem re-scored; previously major: community PR wave 2026-10-14: ~60 landed items in the progress log, among them the Font, Paragraph, Photo Album, theme colour and font and Date and Time dialogs, presenter and show controls, the SmartArt Text Pane and PPTX corpus slices; breadth 84% after `cargo xtask parity`, ready stays ~55%, stage stays alpha; duplicated rows and headers folded; previous: minor, hours to ~95% per audience added) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 DeckCraft aims at full PowerPoint parity, and to be better: faster, open (a documented zip+JSON
 format plus PPTX), scriptable by agents (CLI, JSON control channel, MCP), and available everywhere
@@ -137,6 +137,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 | 2026-10-13 | Video seeks and loops keep newly decoded frames and end-of-stream notifications; stale generations are filtered when consumed (upstream #416). Deterministic queue coverage and repeated seeks across H.264, HEVC, VP9 and AV1 |
 | 2026-10-14 | Add-ins: out-of-process add-ins with the craft apps' shared manifest and protocol (commands, ribbon groups and menus, install from GitHub, the Add-ins window); Office add-ins' task panes on PowerPoint's JavaScript API with DeckCraft's own Office.js (`office.sync`, one undo step per sync); VBA macros through a macro add-in (craft-vba) with the Developer tab, Macro Security and Enable Content; `.pptm`/`.potm`/`.ppsm` keep their macros, and a deck with macros saves as `.pptm` |
 | 2026-10-15 | Add-ins: ribbon buttons that run the presentation's macros (Developer › Ribbon Buttons, Add to Ribbon in the Macros window), saved as the Office ribbon part `customUI14.xml` so PowerPoint shows them too, with a richer ribbon from a file kept and its buttons still shown; Record Macro / Stop Recording, a DeckCraft extra, sends the journaled commands to the macro add-in (`macros/record`) and keeps the code in Module1 |
+| 2026-10-15 | Add-ins: plugin protocol 1.2, shared with GridCraft and WordCraft: add-ins learn the document (`context.document`), answer with a dialog DeckCraft draws (lists with a filter, forms, messages; dialogs chain) or a file to open the File › Open way, and hear when presentations open, save and close (from a background thread, never holding up the save) |
 | 2026-10-13 | EMF and WMF rectangle clip regions (`INTERSECTCLIPRECT`, `EXCLUDECLIPRECT`, `EXTSELECTCLIPRGN`) limit later drawing. EMF+ records are still skipped |
 | 2026-10-13 | Embedded fonts (`p:embeddedFontLst`) are read, written and used to draw. TrueType, OpenType and Embedded OpenType faces load; MicroType Express subsets are kept for the round trip and still draw in a stand-in |
 | 2026-10-13 | Codec parsers (#426): H.264 and HEVC quantiser offsets, Matroska block times, Opus granule timing and QuickTime PCM frame sizes are range-checked before the arithmetic, so a hostile number is a format error instead of an overflow |
@@ -222,6 +223,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | trivial | Progress log: add-in protocol 1.2 |
 | 2026-10-14 | minor | Progress log: add-ins, Office add-ins and VBA; Ecosystem re-scored |
 | 2026-10-13 | trivial | Progress log: Eyedropper in the colour menus, slide.colorAt (#367) |
 | 2026-10-13 | trivial | Progress log: video seek frame-loss race and regression coverage |

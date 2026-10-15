@@ -47,6 +47,8 @@ impl eframe::App for App {
     }
     fn on_exit(&mut self) {
         save_prefs(&self.0);
+        // Add-ins that hear documentClosed get it for what is still open (at most 5 s).
+        self.0.on_quit();
         // macOS (#279): end the process here, before eframe tears the window down. AccessKit's
         // macOS adapter subclasses the window's content view and restores its class on teardown;
         // AppKit's Touch Bar support observes that view (KVO), so in the next display cycle

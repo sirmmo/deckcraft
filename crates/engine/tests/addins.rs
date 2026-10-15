@@ -15,7 +15,7 @@ fn main() {
         serve();
         return;
     }
-    let tests: [(&str, fn()); 7] = [
+    let tests: [(&str, fn()); 12] = [
         ("commands_answer_engine_commands_as_one_step", commands_answer_engine_commands_as_one_step),
         ("macros_drive_the_presentation_as_one_undo_step", macros_drive_the_presentation_as_one_undo_step),
         ("a_failing_macro_changes_nothing", a_failing_macro_changes_nothing),
@@ -23,6 +23,11 @@ fn main() {
         ("modules_live_in_the_presentations_vba_project", modules_live_in_the_presentations_vba_project),
         ("ribbon_buttons_run_their_macro_and_are_saved", ribbon_buttons_run_their_macro_and_are_saved),
         ("recording_sends_the_steps_and_keeps_the_code", recording_sends_the_steps_and_keeps_the_code),
+        ("commands_and_macros_see_the_document", commands_and_macros_see_the_document),
+        ("programmatic_runs_return_open_and_dialog", programmatic_runs_return_open_and_dialog),
+        ("declared_events_follow_opens_saves_and_closes", declared_events_follow_opens_saves_and_closes),
+        ("events_never_hold_up_or_fail_a_save", events_never_hold_up_or_fail_a_save),
+        ("events_cant_change_the_presentation", events_cant_change_the_presentation),
     ];
     for (name, t) in tests {
         t();
@@ -64,6 +69,69 @@ fn serve() {
             Some("commands/run") if p["command"] == "title" => {
                 let n = p["context"]["slides"].as_u64().unwrap_or(0);
                 json!({"result": {"commands": [{"command": "slide.new", "params": {"layout": "title", "title": format!("After {n}")}}], "message": "added"}})
+            }
+            // Protocol 1.2.
+            Some("commands/run") if p["command"] == "ctx" => json!({"result": {"result": p["context"]}}),
+            Some("commands/run") if p["command"] == "opener" => {
+                json!({"result": {"open": {"path": p["params"]["path"], "label": "Cloud · deck", "readOnly": true}, "message": "opening"}})
+            }
+            Some("commands/run") if p["command"] == "browse" => match p["params"]["id"].as_str() {
+                // A folder: another dialog, one level down.
+                Some(folder) if folder.ends_with('/') => json!({"result": {"dialog": {
+                    "title": format!("In {folder}"), "kind": "list", "items": [{"id": format!("{folder}b.pptx"), "label": "b.pptx", "icon": "presentation"}],
+                    "command": "browse", "buttons": [{"label": "Up", "command": "browse"}]
+                }}}),
+                Some(file) => json!({"result": {"message": format!("picked {file}")}}),
+                None => json!({"result": {"dialog": {
+                    "title": "Browse", "kind": "list", "prompt": "Documents", "multi": false,
+                    "items": [{"id": "/docs/", "label": "docs", "detail": "Folder", "icon": "folder"}, {"id": "/a.pptx", "label": "a.pptx"}],
+                    "command": "browse", "params": {"account": "me"}, "okLabel": "Open"
+                }}}),
+            },
+            Some("commands/run") if p["command"] == "stray" => {
+                json!({"result": {"dialog": {"kind": "message", "prompt": "hi", "buttons": [{"label": "Elsewhere", "command": "notMine"}]}}})
+            }
+            Some("commands/run") if p["command"] == "combo" => json!({"result": {
+                "dialog": {"kind": "message", "prompt": "Signed in"}, "result": {"account": "me"}, "message": "connected",
+                "commands": [{"command": "slide.new", "params": {}}]
+            }}),
+            Some("commands/run") if p["command"] == "malformed" => json!({"result": {"dialog": {"kind": "web", "url": "https://x"}}}),
+            Some("macros/run") if p["name"] == "Module1.Where" => {
+                let doc = &p["context"]["document"];
+                host(
+                    &mut out,
+                    &mut lines,
+                    "host/message",
+                    json!({"text": format!("in {} dirty {}", doc["name"].as_str().unwrap_or("?"), doc["dirty"])}),
+                );
+                json!({"result": {}})
+            }
+            Some(m) if m.starts_with("events/") => {
+                let name = p["name"].as_str().unwrap_or("").to_string();
+                if name.contains("slow") {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                }
+                if name.contains("hang") && m == "events/documentClosed" {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                }
+                if name.contains("fail") {
+                    json!({"error": {"code": 1, "message": "upload failed"}})
+                } else if m == "events/documentOpened" {
+                    // Reading works; changing is refused during an event.
+                    let r = host(&mut out, &mut lines, "host/sync", json!({"actions": [{"op": "load", "path": slides, "props": ["count"]}]}));
+                    let n = r["result"]["results"][0]["count"].as_u64().unwrap_or(0);
+                    let w = host(
+                        &mut out,
+                        &mut lines,
+                        "host/sync",
+                        json!({"actions": [{"op": "call", "path": first_shapes, "method": "addTextBox", "args": ["x", {"left": 1, "top": 1, "width": 9, "height": 9}]}]}),
+                    );
+                    let v = host(&mut out, &mut lines, "host/vbaProject/set", json!({"base64": ""}));
+                    host(&mut out, &mut lines, "host/message", json!({"text": "noted"}));
+                    json!({"result": {"message": format!("opened {name}: {n} slides; write {} {}", w["error"]["data"]["code"].as_str().unwrap_or("allowed"), v["error"]["data"]["code"].as_str().unwrap_or("allowed"))}})
+                } else {
+                    json!({"result": {"message": format!("{} {name} {}", &m[7..], p["format"].as_str().unwrap_or("-"))}})
+                }
             }
             Some("commands/run") if p["command"] == "broken" => {
                 json!({"result": {"commands": [{"command": "slide.new", "params": {"layout": "blank"}}, {"command": "no.suchCommand", "params": {}}]}})
@@ -133,16 +201,44 @@ fn serve() {
 
 fn session() -> Session {
     let mut s = Session::with_new();
-    let dir = std::env::temp_dir().join(format!("deckcraft-engine-addins-{}", std::process::id()));
+    load(&mut s, PLUGIN, json!(["documentOpened", "documentSaved", "documentClosed"]));
+    s
+}
+
+/// Loads the test add-in as `id`, hearing `events`.
+fn load(s: &mut Session, id: &str, events: Json) {
+    let dir = std::env::temp_dir().join(format!("deckcraft-engine-addins-{}-{id}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exe = std::env::current_exe().unwrap();
+    let commands: Vec<Json> =
+        ["title", "broken", "ctx", "opener", "browse", "stray", "malformed", "combo"].iter().map(|c| json!({"id": c, "label": c})).collect();
     let manifest = json!({
-        "id": PLUGIN, "name": "Test add-in", "macros": {"language": "TestBasic"}, "run": {"command": exe, "args": ["--serve"]},
-        "commands": [{"id": "title", "label": "Title"}, {"id": "broken", "label": "Broken"}]
+        "id": id, "name": "Test add-in", "macros": {"language": "TestBasic"}, "run": {"command": exe, "args": ["--serve"]},
+        "commands": commands, "events": events
     });
     std::fs::write(dir.join("plugin.json"), manifest.to_string()).unwrap();
     s.execute("plugins.load", &json!({"path": dir})).unwrap();
-    s
+}
+
+/// A scratch folder for this test.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("deckcraft-engine-addins-{}-files-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// What the add-ins answered to events, as `plugin: message` (or `plugin: error …`), waiting
+/// until they all were delivered.
+fn heard(s: &mut Session) -> Vec<String> {
+    assert!(s.wait_events(std::time::Duration::from_secs(20)), "events delivered");
+    s.take_event_outcomes()
+        .into_iter()
+        .map(|o| match o.result {
+            Ok(m) => format!("{}: {}{}", o.plugin, m.unwrap_or_default(), o.notes.iter().map(|n| format!(" [{n}]")).collect::<String>()),
+            Err(e) => format!("{}: error {e}", o.plugin),
+        })
+        .collect()
 }
 
 fn slides(s: &Session) -> usize {
@@ -303,4 +399,159 @@ fn recording_sends_the_steps_and_keeps_the_code() {
     assert!(deckcraft_engine::plugin::unload(PLUGIN));
     assert!(s.execute("developer.recordMacro", &json!({})).is_err(), "no add-in, no recording");
     assert!(s.recording.is_none());
+}
+
+fn commands_and_macros_see_the_document() {
+    let mut s = session();
+    let doc = &s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "ctx"})).unwrap()["result"]["document"];
+    assert_eq!(doc["path"], Json::Null, "a new presentation has no file");
+    assert_eq!((doc["name"].as_str(), doc["dirty"].as_bool()), (Some("Presentation1"), Some(false)), "{doc}");
+    let path = scratch("ctx").join("Deck.pptx").to_string_lossy().to_string();
+    s.execute("file.saveAs", &json!({"path": path})).unwrap();
+    s.execute("slide.new", &json!({})).unwrap();
+    let r = s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "ctx"})).unwrap();
+    assert_eq!(r["result"]["document"], json!({"path": path, "name": "Deck.pptx", "dirty": true}));
+    assert!(r["result"]["slides"].is_number(), "the 1.1 fields stay");
+    // macros/run gets the same `context.document`.
+    s.execute("developer.enableMacros", &json!({})).unwrap();
+    s.execute("developer.runMacro", &json!({"name": "Module1.Where"})).unwrap();
+    assert!(s.ui_requests.iter().any(|q| matches!(q, deckcraft_engine::UiRequest::Message { text } if text == "in Deck.pptx dirty true")));
+    heard(&mut s);
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
+}
+
+fn programmatic_runs_return_open_and_dialog() {
+    let mut s = session();
+    let dir = scratch("open");
+    let deck = dir.join("Budget.pptx").to_string_lossy().to_string();
+    std::fs::write(&deck, deckcraft_engine::cmd::file::save_bytes(&s.active().unwrap().doc, "pptx").unwrap()).unwrap();
+    let docs = s.documents().len();
+    // A programmatic run opens nothing: the caller gets `open`.
+    let r = s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "opener", "params": {"path": deck}})).unwrap();
+    assert_eq!(r["open"], json!({"path": deck, "label": "Cloud · deck", "readOnly": true}));
+    assert_eq!(r["message"], "opening");
+    assert_eq!(s.documents().len(), docs);
+    // The caller opens it the normal way; the label shows as its location.
+    s.execute("file.open", &json!({"path": deck, "label": r["open"]["label"]})).unwrap();
+    assert_eq!(s.execute("file.info", &json!({})).unwrap()["label"], "Cloud · deck");
+    // Not absolute, missing, a folder, not a presentation: the command fails and changes nothing.
+    let txt = dir.join("notes.odp");
+    std::fs::write(&txt, "x").unwrap();
+    for bad in [
+        "Budget.pptx".to_string(),
+        dir.join("gone.pptx").to_string_lossy().to_string(),
+        dir.to_string_lossy().to_string(),
+        txt.to_string_lossy().to_string(),
+    ] {
+        let e = s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "opener", "params": {"path": bad}})).unwrap_err().to_string();
+        assert!(e.contains("asked to open"), "{e}");
+    }
+    // A dialog comes back for the caller to show; its OK runs the command with the selection,
+    // whose answer can be another dialog (chaining), and so on.
+    let d = s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "browse"})).unwrap()["dialog"].clone();
+    assert_eq!((d["kind"].as_str(), d["okLabel"].as_str(), d["items"].as_array().map(Vec::len)), (Some("list"), Some("Open"), Some(2)), "{d}");
+    let dialog: deckcraft_engine::plugin::Dialog = serde_json::from_value(d).unwrap();
+    let p = deckcraft_engine::plugin::dialog::action_params(&dialog.params, &dialog, &["/docs/".into()], None);
+    let next = s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "browse", "params": p})).unwrap();
+    assert_eq!(next["dialog"]["title"], "In /docs/");
+    let p = json!({"id": "/docs/b.pptx"});
+    assert_eq!(s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "browse", "params": p})).unwrap()["message"], "picked /docs/b.pptx");
+    // Fields combine: `open` + `message` (above), and `dialog` + `result` + `message` + commands.
+    s.ui_requests.clear();
+    let n = slides(&s);
+    let r = s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "combo"})).unwrap();
+    assert_eq!((r["ran"].as_u64(), r["message"].as_str(), r["result"]["account"].as_str()), (Some(1), Some("connected"), Some("me")), "{r}");
+    assert_eq!(r["dialog"]["prompt"], "Signed in");
+    assert_eq!(slides(&s), n + 1);
+    assert!(s.ui_requests.iter().any(|q| matches!(q, deckcraft_engine::UiRequest::Message { text } if text == "connected")), "the message shows too");
+    // A dialog that runs another add-in's command, or isn't one: an error, not a crash.
+    assert!(s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "stray"})).unwrap_err().to_string().contains("notMine"));
+    assert!(s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "malformed"})).unwrap_err().to_string().contains("kind"));
+    heard(&mut s);
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
+}
+
+fn declared_events_follow_opens_saves_and_closes() {
+    let mut s = session();
+    // An add-in that declares no events hears none.
+    load(&mut s, "org.deckcraft.test-quiet", json!([]));
+    let dir = scratch("events");
+    let path = dir.join("Talk.pptx").to_string_lossy().to_string();
+    s.execute("file.saveAs", &json!({"path": path})).unwrap();
+    assert_eq!(heard(&mut s), [format!("{PLUGIN}: documentSaved Talk.pptx pptx")]);
+    // Autosave isn't a save.
+    s.recovery_dir = Some(dir.join("recovery"));
+    s.execute("slide.new", &json!({})).unwrap();
+    s.execute("file.recovery.save", &json!({})).unwrap();
+    assert!(heard(&mut s).is_empty());
+    s.execute("file.save", &json!({})).unwrap();
+    s.execute("file.close", &json!({})).unwrap();
+    assert_eq!(heard(&mut s), [format!("{PLUGIN}: documentSaved Talk.pptx pptx"), format!("{PLUGIN}: documentClosed Talk.pptx -")]);
+    s.execute("file.open", &json!({"path": path})).unwrap();
+    assert!(heard(&mut s)[0].starts_with(&format!("{PLUGIN}: opened Talk.pptx")));
+    // A new presentation that was never saved has no file: closing it says nothing.
+    s.execute("file.new", &json!({})).unwrap();
+    s.execute("file.close", &json!({})).unwrap();
+    assert!(heard(&mut s).is_empty());
+    // Quitting closes what is open, best effort.
+    assert!(s.quit_events());
+    assert_eq!(heard(&mut s), [format!("{PLUGIN}: documentClosed Talk.pptx -")]);
+    // An add-in turned off hears nothing.
+    s.execute("plugins.setEnabled", &json!({"id": PLUGIN, "enabled": false})).unwrap();
+    s.execute("file.save", &json!({})).unwrap();
+    assert!(heard(&mut s).is_empty());
+    s.execute("plugins.setEnabled", &json!({"id": PLUGIN, "enabled": true})).unwrap();
+    assert!(deckcraft_engine::plugin::unload("org.deckcraft.test-quiet"));
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
+}
+
+fn events_never_hold_up_or_fail_a_save() {
+    let mut s = session();
+    let dir = scratch("slow");
+    // A slow add-in: the save is done at once, the event follows.
+    let slow = dir.join("slow.deckcraft").to_string_lossy().to_string();
+    let t = std::time::Instant::now();
+    s.execute("file.saveAs", &json!({"path": slow})).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_millis(3500), "the save didn't wait for the add-in");
+    assert!(std::path::Path::new(&slow).is_file());
+    assert!(!s.active().unwrap().is_dirty());
+    assert!(!s.wait_events(std::time::Duration::from_millis(100)), "still being delivered");
+    assert!(s.events_pending());
+    assert_eq!(heard(&mut s), [format!("{PLUGIN}: documentSaved slow.deckcraft deckcraft")]);
+    // A failing add-in: the save stands, the error is reported.
+    let fail = dir.join("fail.pptx").to_string_lossy().to_string();
+    s.execute("file.saveAs", &json!({"path": fail})).unwrap();
+    assert!(std::path::Path::new(&fail).is_file());
+    assert_eq!(heard(&mut s), [format!("{PLUGIN}: error upload failed")]);
+    // documentClosed times out after 5 s; the close is done at once, and nothing breaks.
+    let hang = dir.join("hang.pptx").to_string_lossy().to_string();
+    s.execute("file.saveAs", &json!({"path": hang})).unwrap();
+    heard(&mut s);
+    let t = std::time::Instant::now();
+    s.execute("file.close", &json!({})).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_millis(3500));
+    assert!(s.documents().is_empty());
+    let said = heard(&mut s);
+    assert!(t.elapsed() < std::time::Duration::from_secs(8), "timed out at 5 s, not when the add-in answered");
+    assert!(said[0].contains("error") && said[0].contains("took longer"), "{said:?}");
+    // The add-in starts again for the next command.
+    s.execute("file.new", &json!({})).unwrap();
+    assert_eq!(s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "title"})).unwrap()["ran"], 1);
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
+}
+
+fn events_cant_change_the_presentation() {
+    let mut s = session();
+    let path = scratch("readonly").join("Look.pptx").to_string_lossy().to_string();
+    s.execute("file.saveAs", &json!({"path": path})).unwrap();
+    s.execute("file.close", &json!({})).unwrap();
+    heard(&mut s);
+    s.execute("file.open", &json!({"path": path})).unwrap();
+    let (n, undo) = (slides(&s), s.active().unwrap().history.undo.len());
+    let said = heard(&mut s);
+    assert_eq!(said, [format!("{PLUGIN}: opened Look.pptx: {n} slides; write AccessDenied AccessDenied [noted]")]);
+    let st = s.active().unwrap();
+    assert!(!st.is_dirty() && st.history.undo.len() == undo, "an event is no edit and no undo step");
+    assert_eq!(st.doc.slides[0].shapes.len(), deckcraft_pptx::import(&std::fs::read(&path).unwrap()).unwrap().slides[0].shapes.len());
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
 }

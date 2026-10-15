@@ -253,3 +253,164 @@ fn an_office_add_ins_task_pane_reads_and_writes_the_presentation() {
     h.run_steps(2);
     assert!(web.0.lock().unwrap().hidden.contains(&key));
 }
+
+/// The add-in the dialog test talks to: this test binary started again by the plugin host, which
+/// sets `CRAFT_PLUGIN_DIR` (a normal test run returns at once). libtest's own lines on standard
+/// output aren't JSON, so the host skips them.
+#[test]
+fn serve_dialog_addin() {
+    use std::io::{BufRead, Write};
+    let Some(dir) = std::env::var_os("CRAFT_PLUGIN_DIR").map(std::path::PathBuf::from) else { return };
+    if !dir.to_string_lossy().contains("deckcraft-ui-dialog-addin") {
+        return;
+    }
+    let mut out = std::io::stdout();
+    // Ends libtest's "test … " line, so the answers start on lines of their own.
+    writeln!(out).unwrap();
+    for line in std::io::stdin().lock().lines() {
+        let Ok(msg) = serde_json::from_str::<Json>(&line.unwrap()) else { continue };
+        let Some(id) = msg.get("id").cloned() else { break };
+        let p = &msg["params"];
+        let result = match (msg["method"].as_str().unwrap_or(""), p["command"].as_str().unwrap_or("")) {
+            ("commands/run", "browse") => match p["params"]["id"].as_str() {
+                None => json!({"dialog": {
+                    "title": "Browse the cloud", "kind": "list", "prompt": "Documents",
+                    "items": [{"id": "/docs/", "label": "docs", "detail": "Folder", "icon": "folder"}, {"id": "/a.pptx", "label": "a.pptx", "icon": "presentation"}],
+                    "command": "browse", "okLabel": "Go there",
+                    "buttons": [{"label": "Sign in", "command": "login"}]
+                }}),
+                Some("/docs/") => json!({"dialog": {
+                    "title": "In docs", "kind": "list", "items": [{"id": "/docs/b.deckcraft", "label": "b.deckcraft", "detail": "2 KB"}], "command": "browse"
+                }}),
+                Some(_) => json!({"open": {"path": dir.join("b.deckcraft"), "label": "Test cloud · docs/b.deckcraft"}, "message": "fetched"}),
+            },
+            ("commands/run", "login") => match p["params"]["fields"].as_object() {
+                None => json!({"dialog": {"title": "Sign in", "kind": "form", "command": "login", "fields": [
+                    {"id": "user", "label": "User name"},
+                    {"id": "pw", "label": "Password", "kind": "secret", "value": "hunter2"},
+                    {"id": "keep", "label": "Stay signed in", "kind": "checkbox", "value": true}
+                ]}}),
+                Some(f) => json!({"message": format!("hello {} {} {}", f["user"].as_str().unwrap_or(""), f["pw"].as_str().unwrap_or(""), f["keep"])}),
+            },
+            _ => json!({}),
+        };
+        writeln!(out, "{}", json!({"jsonrpc": "2.0", "id": id, "result": result})).unwrap();
+        out.flush().unwrap();
+    }
+}
+
+#[test]
+fn an_add_ins_dialogs_chain_and_open_files() {
+    let _one_at_a_time = ADDINS.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("deckcraft-ui-dialog-addin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // The file the add-in hands over.
+    let mut deck = Session::with_new();
+    deck.execute("slide.new", &json!({})).unwrap();
+    deck.execute("file.saveAs", &json!({"path": dir.join("b.deckcraft")})).unwrap();
+    let m = deckcraft_engine::plugin::Manifest::parse(
+        &json!({
+            "id": "t.dialogs", "name": "Dialogs",
+            "run": {"command": std::env::current_exe().unwrap(), "args": ["--exact", "addins::tests::serve_dialog_addin", "--nocapture", "--test-threads=1"]},
+            "commands": [{"id": "browse", "label": "Browse"}, {"id": "login", "label": "Sign In"}],
+            "ui": {"ribbon": [{"tab": "Cloud", "group": "Files", "buttons": [{"command": "browse", "icon": "folder"}]}]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    deckcraft_engine::plugin::install(m, dir.clone()).unwrap();
+    let _unload = Unload("t.dialogs");
+    let mut h = harness(Session::with_new(), Services::default());
+    h.state_mut().ui.tab = "Cloud".into();
+    h.run_steps(3);
+    // The ribbon button's answer is a dialog, drawn by DeckCraft.
+    h.get_by_label("Browse").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Browse the cloud").is_some(), "the add-in's dialog shows");
+    assert!(h.query_by_label("a.pptx").is_some());
+    // OK without a choice says so and stays.
+    h.get_by_label("Go there").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Choose an item first").is_some());
+    // A folder, then OK: the add-in answers with the next dialog (dialogs chain).
+    h.get_by_label("docs").click();
+    h.run_steps(2);
+    h.get_by_label("Go there").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("In docs").is_some(), "the next dialog");
+    assert!(h.query_by_label("Browse the cloud").is_none());
+    // A file, then OK: the add-in answers `open`, which opens the file as File › Open does.
+    let docs = h.state().session.documents().len();
+    h.get_by_label("b.deckcraft").click();
+    h.run_steps(2);
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert!(h.state().addins.dialog.is_none(), "the dialog closed");
+    for _ in 0..500 {
+        h.run_steps(1);
+        if h.state().opening.is_none() && h.state().session.documents().len() > docs {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(h.state().session.documents().len(), docs + 1);
+    let opened = h.state().session.active().unwrap();
+    assert_eq!(opened.path.as_deref(), Some(dir.join("b.deckcraft").to_string_lossy().as_ref()));
+    assert_eq!(opened.location_label.as_deref(), Some("Test cloud · docs/b.deckcraft"), "the label is its location");
+    // A dialog's extra button runs its command: a form, whose OK sends the fields.
+    h.get_by_label("Browse").click();
+    h.run_steps(3);
+    h.get_by_label("Sign in").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Stay signed in").is_some(), "the form");
+    h.get_by_label("User name").click();
+    h.run_steps(2);
+    h.get_by_label("User name").type_text("ada");
+    h.run_steps(2);
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    let said = h.state().status.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert_eq!(said, "hello ada hunter2 true");
+    assert!(h.state().addins.dialog.is_none());
+    // Cancel just closes.
+    h.get_by_label("Browse").click();
+    h.run_steps(3);
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(h.state().addins.dialog.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_add_ins_dialog_is_bounded_and_filters_long_lists() {
+    use deckcraft_engine::plugin::Dialog;
+    let items: Vec<Json> = (0..30).map(|i| json!({"id": i.to_string(), "label": format!("Item {i}"), "icon": "no-such-icon"})).collect();
+    let d = Dialog::parse(&json!({"kind": "list", "items": items, "command": "go", "multi": true})).unwrap();
+    let mut pd = super::PluginDialog::new("t.x", d);
+    assert_eq!(pd.visible().len(), 30);
+    pd.filter = "item 2".into();
+    assert_eq!(pd.visible().len(), 11, "Item 2 and Item 20–29");
+    pd.click(3);
+    pd.click(5);
+    pd.click(3);
+    assert_eq!(pd.selected_ids(), ["5"], "multi toggles");
+    assert_eq!(pd.action(None).unwrap().unwrap().1, json!({"ids": ["5"]}));
+    assert_eq!(super::item_icon("no-such-icon"), crate::icons::Icon::File, "unknown icons are a file");
+    assert_eq!(super::item_icon("folder"), crate::icons::Icon::Folder);
+    let form = Dialog::parse(&json!({"kind": "form", "command": "go", "fields": [{"id": "n", "label": "Count", "kind": "number"}]})).unwrap();
+    let mut pf = super::PluginDialog::new("t.x", form);
+    pf.values[0] = super::FieldValue::Text("lots".into());
+    assert!(pf.action(None).unwrap_err().contains("Count"), "a number that isn't one doesn't run");
+    pf.values[0] = super::FieldValue::Text("12".into());
+    assert_eq!(pf.action(None).unwrap().unwrap(), ("go".to_string(), json!({"fields": {"n": 12}})));
+    // A list's button runs with its own params plus the selected `id` (none without a selection).
+    let list = Dialog::parse(&json!({"kind": "list", "items": [{"id": "/a"}, {"id": "/b"}], "command": "open",
+        "buttons": [{"label": "Delete", "command": "remove", "params": {"account": "me"}}]}))
+    .unwrap();
+    let mut pl = super::PluginDialog::new("t.x", list);
+    assert_eq!(pl.action(Some(0)).unwrap().unwrap(), ("remove".to_string(), json!({"account": "me"})));
+    pl.click(1);
+    assert_eq!(pl.action(Some(0)).unwrap().unwrap(), ("remove".to_string(), json!({"account": "me", "id": "/b"})));
+    let msg = Dialog::parse(&json!({"kind": "message", "prompt": "Done"})).unwrap();
+    assert_eq!(super::PluginDialog::new("t.x", msg).action(None).unwrap(), None, "a message's OK just closes");
+}

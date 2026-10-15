@@ -100,6 +100,123 @@ fn command_replies_are_checked() {
     assert!(parse_reply(json!(null)).unwrap().commands.is_empty());
 }
 
+#[test]
+fn initialize_announces_protocol_1_2() {
+    let p = crate::initialize_params("t.init", std::path::Path::new("/tmp"));
+    assert_eq!(p["protocolVersion"], 1, "protocolVersion stays 1");
+    assert_eq!(p["host"]["features"], json!(["dialogs", "open", "events", "document"]));
+    assert_eq!(p["host"]["language"], "en");
+    crate::set_host_language("not a tag!");
+    assert_eq!(crate::host_language(), "en", "a bad tag is ignored");
+}
+
+#[test]
+fn manifests_declare_the_events_they_hear() {
+    let with = |events: serde_json::Value| json!({"id": "t.ev", "name": "T", "run": {"command": "true"}, "events": events}).to_string();
+    let m = Manifest::parse(&with(json!(["documentSaved", "somethingLater"]))).unwrap();
+    assert_eq!(m.events, ["documentSaved", "somethingLater"]);
+    assert!(Manifest::parse(&with(json!("documentSaved"))).is_err());
+    assert!(Manifest::parse(&with(json!([""]))).is_err());
+    assert!(Manifest::parse(&with(json!(vec!["documentSaved"; 65]))).is_err());
+    let none = Manifest::parse(&json!({"id": "t.ev", "name": "T", "run": {"command": "true"}}).to_string()).unwrap();
+    assert!(none.events.is_empty());
+    crate::install(m, std::env::temp_dir()).unwrap();
+    assert_eq!(crate::listeners("documentSaved"), ["t.ev"]);
+    assert!(crate::listeners("documentOpened").is_empty(), "only what it declared");
+    crate::set_enabled("t.ev", false).unwrap();
+    assert!(crate::listeners("documentSaved").is_empty(), "a plugin turned off hears nothing");
+    let mut refuse = |_: &str, _: &serde_json::Value| Err(crate::HostError::unknown());
+    assert!(crate::send_event("t.ev", "documentSaved", json!({}), &mut refuse).is_err());
+    assert!(crate::unload("t.ev"));
+}
+
+#[test]
+fn replies_may_open_a_file_or_show_a_dialog() {
+    let r = parse_reply(json!({"open": {"path": "/tmp/a.pptx", "label": "x".repeat(300), "readOnly": true}})).unwrap();
+    let open = r.open.unwrap();
+    assert_eq!((open.path.as_str(), open.label.as_ref().map(|l| l.chars().count()), open.read_only), ("/tmp/a.pptx", Some(200), true));
+    for bad in [json!({"open": "a.pptx"}), json!({"open": {}}), json!({"open": {"path": ""}}), json!({"open": {"path": "/a", "readOnly": "yes"}})] {
+        assert!(parse_reply(bad.clone()).is_err(), "{bad}");
+    }
+
+    let list = json!({"dialog": {
+        "title": "Open from Nextcloud", "kind": "list", "prompt": "Documents",
+        "items": [{"id": "/Documents/Reports", "label": "Reports", "detail": "Folder", "icon": "folder"}, {"id": 7}],
+        "command": "browse", "params": {"account": "me"}, "okLabel": "Open",
+        "buttons": [{"label": "Up", "command": "browse", "params": {"path": "/"}}]
+    }});
+    let d = parse_reply(list).unwrap().dialog.unwrap();
+    assert_eq!(d.kind, crate::dialog::DialogKind::List);
+    assert_eq!(d.items.len(), 2);
+    assert_eq!((d.items[1].id.as_str(), d.items[1].label.as_str()), ("7", "7"), "a label defaults to the id");
+    assert_eq!(d.ok_label, "Open");
+    assert_eq!(d.commands().collect::<Vec<_>>(), ["browse", "browse"]);
+    // Selections go back as `id` (or `ids` with `multi`), forms as `fields`.
+    let p = crate::dialog::action_params(&d.params, &d, &["/Documents/Reports".into()], None);
+    assert_eq!(p, json!({"account": "me", "id": "/Documents/Reports"}));
+    let multi = crate::dialog::Dialog { multi: true, ..d.clone() };
+    assert_eq!(crate::dialog::action_params(&d.buttons[0].params, &multi, &["a".into(), "b".into()], None), json!({"path": "/", "ids": ["a", "b"]}));
+    assert_eq!(crate::dialog::action_params(&d.params, &d, &[], None), json!({"account": "me"}), "no selection, no id");
+
+    // Over a limit is cut, never refused.
+    let items: Vec<serde_json::Value> = (0..10_050).map(|i| json!({"id": format!("{i}{}", "x".repeat(5000)), "label": "l".repeat(400)})).collect();
+    let big = parse_reply(json!({"dialog": {"kind": "list", "title": "t".repeat(500), "items": items, "command": "go",
+        "buttons": (0..9).map(|_| json!({"label": "B", "command": "go"})).collect::<Vec<_>>()}}))
+    .unwrap()
+    .dialog
+    .unwrap();
+    assert_eq!((big.items.len(), big.buttons.len(), big.title.chars().count()), (10_000, 4, 200));
+    assert_eq!((big.items[0].id.chars().count(), big.items[0].label.chars().count()), (4096, 256));
+
+    let form = json!({"dialog": {"kind": "form", "title": "Sign in", "command": "login", "fields": [
+        {"id": "user", "label": "User", "value": "me"},
+        {"id": "pw", "label": "Password", "kind": "secret"},
+        {"id": "n", "kind": "number", "value": 3},
+        {"id": "keep", "kind": "checkbox", "value": true},
+        {"id": "srv", "kind": "choice", "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "value": "b"},
+        {"id": "srv2", "kind": "choice", "options": [{"id": "a", "label": "A"}], "value": "zzz"}
+    ]}});
+    let f = parse_reply(form).unwrap().dialog.unwrap();
+    assert_eq!(f.fields.len(), 6);
+    assert_eq!(f.fields[2].value, json!("3"));
+    assert_eq!(f.fields[3].value, json!(true));
+    assert_eq!(f.fields[4].value, json!("b"));
+    assert_eq!(f.fields[5].value, json!("a"), "an unknown choice starts at the first option");
+    assert_eq!(f.ok_label, "OK");
+    let mut fields = serde_json::Map::new();
+    fields.insert("user".into(), json!("me"));
+    assert_eq!(crate::dialog::action_params(&f.params, &f, &[], Some(fields)), json!({"fields": {"user": "me"}}));
+    assert_eq!(crate::dialog::number_value(" 2.5 "), Some(json!(2.5)));
+    assert_eq!(crate::dialog::number_value("4"), Some(json!(4)));
+    assert_eq!(crate::dialog::number_value(""), Some(json!(null)));
+    assert_eq!(crate::dialog::number_value("NaN"), None);
+    assert_eq!(crate::dialog::number_value("four"), None);
+
+    let msg = parse_reply(json!({"dialog": {"kind": "message", "prompt": "p".repeat(5000)}})).unwrap().dialog.unwrap();
+    assert_eq!((msg.prompt.chars().count(), msg.command.is_none()), (4000, true), "a message needs no command");
+
+    // Malformed: an error for the command, never a crash.
+    for bad in [
+        json!({"dialog": "hi"}),
+        json!({"dialog": {"kind": "web"}}),
+        json!({"dialog": {"title": "no kind"}}),
+        json!({"dialog": {"kind": "list", "command": "go"}}),
+        json!({"dialog": {"kind": "list", "items": []}}),
+        json!({"dialog": {"kind": "list", "items": [{"label": "no id"}], "command": "go"}}),
+        json!({"dialog": {"kind": "list", "items": [], "command": "../x"}}),
+        json!({"dialog": {"kind": "list", "items": [], "command": "go", "params": [1]}}),
+        json!({"dialog": {"kind": "form", "command": "go", "fields": [{"id": "x", "kind": "slider"}]}}),
+        json!({"dialog": {"kind": "form", "command": "go", "fields": [{"id": "x", "kind": "choice"}]}}),
+        json!({"dialog": {"kind": "form", "command": "go", "fields": [{"id": "x", "kind": "checkbox", "value": "yes"}]}}),
+        json!({"dialog": {"kind": "form", "command": "go", "fields": [{"label": "no id"}]}}),
+        json!({"dialog": {"kind": "message", "buttons": [{"label": "B"}]}}),
+        json!({"dialog": {"kind": "message", "buttons": {}}}),
+        json!({"dialog": {"kind": "message", "title": 5}}),
+    ] {
+        assert!(parse_reply(bad.clone()).is_err(), "{bad}");
+    }
+}
+
 mod install {
     use std::io::Write;
 

@@ -1539,6 +1539,33 @@ impl SlideApp {
         }
     }
 
+    /// Shows what add-ins answered to document events (protocol 1.2): a message in the status bar,
+    /// an error as a notice. Keeps painting while events are on their way.
+    pub(crate) fn poll_addin_events(&mut self, ctx: &egui::Context) {
+        if !self.session.events_pending() {
+            return;
+        }
+        for o in self.session.take_event_outcomes() {
+            let name = deckcraft_engine::plugin::get(&o.plugin).map(|p| p.manifest.name.clone()).unwrap_or_else(|| o.plugin.clone());
+            for note in o.notes.into_iter().filter(|n| !n.trim().is_empty()) {
+                self.set_status(note);
+            }
+            match o.result {
+                Ok(Some(m)) => self.set_status(m),
+                Ok(None) => {}
+                Err(e) => self.notify(format!("{name}: {e}")),
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    /// The app is quitting: add-ins that hear `documentClosed` get it for every open presentation
+    /// that has a file, waiting at most 5 s (best effort).
+    pub fn on_quit(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.session.quit_events();
+    }
+
     /// Per-frame logic before layout: styles, control requests, screenshots, shortcuts.
     pub fn logic(&mut self, ctx: &egui::Context) {
         let scale = self.ui.ui_scale.clamp(0.5, 3.0);
@@ -1564,6 +1591,7 @@ impl SlideApp {
         self.last_time = now;
         self.drain_control(ctx);
         self.poll_opening();
+        self.poll_addin_events(ctx);
         if self.fonts_ready {
             self.drain_inbox();
         }
@@ -1596,6 +1624,13 @@ impl SlideApp {
         // delivers them through `Services::inbox`, tagged with the request captured at the drop.
         #[cfg(not(target_arch = "wasm32"))]
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
+            // A presentation dropped from the file manager opens from its file, as File › Open
+            // does: Save goes back to it, and add-ins hear that it was opened.
+            let dropped = f.path();
+            if dropped.is_absolute() && dropped.is_file() && is_presentation_name(&dropped.to_string_lossy().to_ascii_lowercase()) {
+                self.open_path_in_background(&dropped.to_string_lossy());
+                continue;
+            }
             let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dropped file".into());
             match f.bytes() {
                 Ok(bytes) => self.open_or_insert_bytes(&name, &bytes),

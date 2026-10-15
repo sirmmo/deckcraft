@@ -33,6 +33,8 @@ pub struct State {
     pub editor: Option<Editor>,
     pub security: bool,
     pub buttons: Option<ButtonsWindow>,
+    /// A dialog an add-in asked for (protocol 1.2), drawn by DeckCraft.
+    pub dialog: Option<PluginDialog>,
     /// The presentation's ribbon as last read: (presentation uid, model pointer, tabs, editable).
     deck: Option<(u64, usize, DeckTabs, bool)>,
     /// Presentations whose "macros disabled" bar was dismissed or acted on.
@@ -170,9 +172,318 @@ pub fn menu_items(kind: MenuKind) -> Vec<Item> {
     out
 }
 
-/// Runs an add-in's command.
+/// Runs an add-in's command (a ribbon button or menu item), then does what it asked for after
+/// its step: open a file, show a dialog.
 pub fn run(app: &mut SlideApp, item: &Item) {
-    let _ = app.run("plugins.run", json!({"plugin": item.plugin, "command": item.command, "params": item.params}));
+    let _ = run_command(app, &item.plugin, &item.command, item.params.clone());
+}
+
+/// Runs `plugin`'s `command` from DeckCraft's own interface (a button, a menu item, a dialog's
+/// button) and acts on its protocol 1.2 answer: `open` opens the file the way File › Open does,
+/// `dialog` shows a dialog whose buttons run more of its commands. A programmatic `plugins.run`
+/// only returns them. Errors show in the status bar and are returned.
+pub fn run_command(app: &mut SlideApp, plugin: &str, command: &str, params: Json) -> Result<(), String> {
+    let r = app.run("plugins.run", json!({"plugin": plugin, "command": command, "params": params}))?;
+    if let Some(open) = r.get("open").and_then(|o| serde_json::from_value::<plugin::OpenRequest>(o.clone()).ok()) {
+        // `readOnly` is ignored: DeckCraft has no read-only mode.
+        app.open_path_labelled(&open.path, open.label);
+    }
+    if let Some(d) = r.get("dialog").and_then(|d| serde_json::from_value::<plugin::Dialog>(d.clone()).ok()) {
+        app.addins.dialog = Some(PluginDialog::new(plugin, d));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- add-ins' dialogs (protocol 1.2)
+
+/// A form field's value as typed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldValue {
+    Text(String),
+    Check(bool),
+}
+
+/// A dialog an add-in asked for: what it shows and what the user has chosen or typed.
+#[derive(Clone, Debug)]
+pub struct PluginDialog {
+    pub plugin: String,
+    pub dialog: plugin::Dialog,
+    /// The list's filter (shown above [`plugin::dialog::FILTER_ABOVE`] items).
+    pub filter: String,
+    /// Selected items, by index, in the order chosen.
+    pub selected: Vec<usize>,
+    pub values: Vec<FieldValue>,
+    /// Why the last OK didn't run (a number that isn't one) or failed.
+    pub error: Option<String>,
+}
+
+impl PluginDialog {
+    pub fn new(plugin: &str, dialog: plugin::Dialog) -> PluginDialog {
+        use plugin::dialog::FieldKind;
+        let values = dialog
+            .fields
+            .iter()
+            .map(|f| match f.kind {
+                FieldKind::Checkbox => FieldValue::Check(f.value.as_bool().unwrap_or(false)),
+                _ => FieldValue::Text(f.value.as_str().unwrap_or("").to_string()),
+            })
+            .collect();
+        PluginDialog { plugin: plugin.to_string(), dialog, filter: String::new(), selected: Vec::new(), values, error: None }
+    }
+
+    /// The selected items' ids.
+    pub fn selected_ids(&self) -> Vec<String> {
+        self.selected.iter().filter_map(|i| self.dialog.items.get(*i)).map(|it| it.id.clone()).collect()
+    }
+
+    /// The form's `fields`, or what's wrong with them.
+    pub fn fields(&self) -> Result<serde_json::Map<String, Json>, String> {
+        use plugin::dialog::FieldKind;
+        let mut out = serde_json::Map::new();
+        for (f, v) in self.dialog.fields.iter().zip(&self.values) {
+            let value = match (f.kind, v) {
+                (_, FieldValue::Check(b)) => json!(b),
+                (FieldKind::Number, FieldValue::Text(t)) => plugin::dialog::number_value(t).ok_or_else(|| format!("{}: type a number", f.label))?,
+                (_, FieldValue::Text(t)) => json!(t),
+            };
+            out.insert(f.id.clone(), value);
+        }
+        Ok(out)
+    }
+
+    /// The items the filter lets through, by index.
+    pub fn visible(&self) -> Vec<usize> {
+        let f = self.filter.trim().to_lowercase();
+        let filtering = self.dialog.items.len() > plugin::dialog::FILTER_ABOVE && !f.is_empty();
+        (0..self.dialog.items.len())
+            .filter(|i| !filtering || self.dialog.items.get(*i).is_some_and(|it| it.label.to_lowercase().contains(&f)))
+            .collect()
+    }
+
+    /// A click on item `i`: selects it (with `multi`, adds or removes it).
+    pub fn click(&mut self, i: usize) {
+        if self.dialog.multi {
+            match self.selected.iter().position(|x| *x == i) {
+                Some(k) => {
+                    self.selected.remove(k);
+                }
+                None => self.selected.push(i),
+            }
+        } else {
+            self.selected = vec![i];
+        }
+    }
+
+    /// The command and params OK (`None`) or extra button `button` runs, or why it can't run.
+    /// `Ok(None)`: nothing to run (a message's OK without a command just closes).
+    pub fn action(&self, button: Option<usize>) -> Result<Option<(String, Json)>, String> {
+        let (command, base) = match button {
+            Some(b) => match self.dialog.buttons.get(b) {
+                Some(b) => (b.command.clone(), &b.params),
+                None => return Ok(None),
+            },
+            None => match &self.dialog.command {
+                Some(c) => (c.clone(), &self.dialog.params),
+                None => return Ok(None),
+            },
+        };
+        let fields = if self.dialog.kind == plugin::dialog::DialogKind::Form { Some(self.fields()?) } else { None };
+        // OK on a list needs an item; a button runs with or without one.
+        if button.is_none() && self.dialog.kind == plugin::dialog::DialogKind::List && self.selected.is_empty() {
+            return Err("Choose an item first".into());
+        }
+        Ok(Some((command, plugin::dialog::action_params(base, &self.dialog, &self.selected_ids(), fields))))
+    }
+}
+
+/// The icon a dialog item names: the app's icon names as for ribbon buttons, a few file kinds, and
+/// a generic file for anything else.
+pub fn item_icon(name: &str) -> Icon {
+    match name.to_ascii_lowercase().as_str() {
+        "folder" | "directory" => Icon::Folder,
+        "" | "file" | "document" | "workbook" | "presentation" | "spreadsheet" => Icon::File,
+        other => icon_named(other).or_else(|| Icon::from_name(other)).unwrap_or(Icon::File),
+    }
+}
+
+/// Runs what the user chose in an add-in's dialog: the dialog closes and the command runs; if it
+/// fails, the dialog comes back with the reason, so a mistyped password can be typed again.
+fn dialog_action(app: &mut SlideApp, d: PluginDialog, button: Option<usize>) {
+    let (command, params) = match d.action(button) {
+        Ok(Some(x)) => x,
+        Ok(None) => return,
+        Err(e) => {
+            app.addins.dialog = Some(PluginDialog { error: Some(e), ..d });
+            return;
+        }
+    };
+    if let Err(e) = run_command(app, &d.plugin, &command, params)
+        && app.addins.dialog.is_none()
+    {
+        app.addins.dialog = Some(PluginDialog { error: Some(e), ..d });
+    }
+}
+
+/// Draws the add-in's dialog, a modal in DeckCraft's own widgets and theme.
+pub fn plugin_dialog_window(app: &mut SlideApp, ctx: &egui::Context) {
+    use plugin::dialog::{DialogKind, FieldKind};
+    let Some(mut d) = app.addins.dialog.take() else { return };
+    let t = crate::theme::Tokens::get(ctx);
+    let mut close = false;
+    let mut act: Option<Option<usize>> = None;
+    let title = if d.dialog.title.trim().is_empty() {
+        plugin::get(&d.plugin).map(|p| p.manifest.name.clone()).unwrap_or_else(|| d.plugin.clone())
+    } else {
+        d.dialog.title.clone()
+    };
+    let modal = egui::Modal::new(egui::Id::new("addin_dialog")).show(ctx, |ui| {
+        ui.set_width(480.0);
+        ui.label(RichText::new(&title).font(crate::theme::bold(15.0)).color(t.text));
+        ui.add_space(6.0);
+        if !d.dialog.prompt.is_empty() {
+            let prompt = RichText::new(&d.dialog.prompt).color(if d.dialog.kind == DialogKind::Message { t.text } else { t.text_dim });
+            egui::ScrollArea::vertical().id_salt("addin_dialog_prompt").max_height(240.0).show(ui, |ui| {
+                ui.add(egui::Label::new(prompt).wrap());
+            });
+            ui.add_space(6.0);
+        }
+        match d.dialog.kind {
+            DialogKind::List => {
+                if d.dialog.items.len() > plugin::dialog::FILTER_ABOVE {
+                    ui.add(egui::TextEdit::singleline(&mut d.filter).hint_text("Filter").desired_width(f32::INFINITY));
+                    ui.add_space(4.0);
+                }
+                let visible = d.visible();
+                let row_h = 26.0;
+                egui::Frame::new().fill(t.field_bg).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(4).inner_margin(2).show(ui, |ui| {
+                    ui.set_min_height(row_h * 8.0);
+                    egui::ScrollArea::vertical().id_salt("addin_dialog_items").max_height(row_h * 12.0).auto_shrink([false, true]).show_rows(
+                        ui,
+                        row_h,
+                        visible.len(),
+                        |ui, rows| {
+                            for i in visible.get(rows).unwrap_or(&[]).iter().copied() {
+                                let Some(item) = d.dialog.items.get(i) else { continue };
+                                let selected = d.selected.contains(&i);
+                                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), egui::Sense::click());
+                                if selected {
+                                    ui.painter().rect_filled(rect, 3.0, t.selected);
+                                } else if resp.hovered() {
+                                    ui.painter().rect_filled(rect, 3.0, t.hover);
+                                }
+                                let icon = egui::Rect::from_min_size(rect.min + vec2(6.0, 5.0), vec2(16.0, 16.0));
+                                crate::icons::paint(ui.painter(), icon, item_icon(&item.icon), t.text, false);
+                                let font = egui::FontId::proportional(13.0);
+                                let detail_w = if item.detail.is_empty() { 0.0 } else { (rect.width() * 0.4).min(200.0) };
+                                let label_rect = egui::Rect::from_min_max(rect.min + vec2(30.0, 0.0), rect.max - vec2(detail_w + 6.0, 0.0));
+                                ui.painter().with_clip_rect(label_rect).text(
+                                    label_rect.left_center(),
+                                    egui::Align2::LEFT_CENTER,
+                                    &item.label,
+                                    font.clone(),
+                                    t.text,
+                                );
+                                if detail_w > 0.0 {
+                                    let detail_rect =
+                                        egui::Rect::from_min_max(egui::pos2(rect.max.x - detail_w - 6.0, rect.min.y), rect.max - vec2(6.0, 0.0));
+                                    ui.painter().with_clip_rect(detail_rect).text(
+                                        detail_rect.left_center(),
+                                        egui::Align2::LEFT_CENTER,
+                                        &item.detail,
+                                        font,
+                                        t.text_dim,
+                                    );
+                                }
+                                let label = item.label.clone();
+                                resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label));
+                                if resp.double_clicked() {
+                                    d.selected = vec![i];
+                                    act = Some(None);
+                                } else if resp.clicked() {
+                                    d.click(i);
+                                }
+                            }
+                        },
+                    );
+                });
+                if d.dialog.multi {
+                    ui.label(RichText::new(format!("{} selected", d.selected.len())).color(t.text_dim));
+                }
+            }
+            DialogKind::Form => {
+                egui::Grid::new("addin_dialog_form").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                    for (k, f) in d.dialog.fields.iter().enumerate() {
+                        let Some(v) = d.values.get_mut(k) else { continue };
+                        match (f.kind, v) {
+                            (FieldKind::Checkbox, FieldValue::Check(b)) => {
+                                ui.label("");
+                                ui.checkbox(b, &f.label);
+                            }
+                            (FieldKind::Choice, FieldValue::Text(chosen)) => {
+                                let l = ui.label(&f.label);
+                                let shown = f.options.iter().find(|o| o.id == *chosen).map(|o| o.label.clone()).unwrap_or_default();
+                                egui::ComboBox::from_id_salt(("addin_dialog_choice", k))
+                                    .selected_text(shown)
+                                    .width(300.0)
+                                    .show_ui(ui, |ui| {
+                                        for o in &f.options {
+                                            ui.selectable_value(chosen, o.id.clone(), &o.label);
+                                        }
+                                    })
+                                    .response
+                                    .labelled_by(l.id);
+                            }
+                            (kind, FieldValue::Text(text)) => {
+                                let l = ui.label(&f.label);
+                                let edit = egui::TextEdit::singleline(text).password(kind == FieldKind::Secret).desired_width(300.0);
+                                ui.add(edit).labelled_by(l.id);
+                            }
+                            (_, FieldValue::Check(b)) => {
+                                ui.label("");
+                                ui.checkbox(b, &f.label);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            }
+            DialogKind::Message => {}
+        }
+        if let Some(e) = &d.error {
+            ui.add_space(4.0);
+            ui.colored_label(crate::icons::RED, e);
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            for (k, b) in d.dialog.buttons.iter().enumerate() {
+                if ui.button(&b.label).clicked() {
+                    act = Some(Some(k));
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                let ok = egui::Button::new(RichText::new(&d.dialog.ok_label).color(t.accent_text)).fill(t.accent);
+                if ui.add(ok).clicked() {
+                    act = Some(None);
+                }
+            });
+        });
+    });
+    if modal.should_close() || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        close = true;
+    }
+    match act {
+        _ if close => {}
+        Some(button) => {
+            // A message's OK without a command just closes.
+            if button.is_some() || d.dialog.command.is_some() {
+                dialog_action(app, d, button);
+            }
+        }
+        None => app.addins.dialog = Some(d),
+    }
 }
 
 /// The add-ins' items at the end of a right-click menu (with a separator before them).
@@ -596,6 +907,7 @@ pub fn notice_bar(app: &mut SlideApp, ui: &mut Ui) {
 /// Draws the open add-in windows (every frame).
 pub fn windows(app: &mut SlideApp, ctx: &egui::Context) {
     poll_install(app, ctx);
+    plugin_dialog_window(app, ctx);
     addins_window(app, ctx);
     macros_window(app, ctx);
     editor_window(app, ctx);

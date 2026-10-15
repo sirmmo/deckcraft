@@ -18,13 +18,21 @@ pub fn specs() -> Vec<CommandSpec> {
             new
         ),
         cmd!(query "file.templates", "Starter Templates", [], None, "{} → [{name, summary, theme, slides}]", always, templates),
-        cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"), "{path}", always, open),
+        cmd!(
+            noundo "file.open",
+            "Open…",
+            ["File"],
+            Some("Cmd+O"),
+            "{path, label?: text (where an add-in's `open` says it came from; File › Info shows it as the location; at most 200 characters)}",
+            always,
+            open
+        ),
         cmd!(
             noundo "file.adopt",
             "Open",
             [],
             None,
-            "{path, token?} (a presentation the host read in the background and staged with Session::stage_loaded; without one, reads path like file.open)",
+            "{path, token?, label?} (a presentation the host read in the background and staged with Session::stage_loaded; without one, reads path like file.open)",
             always,
             adopt
         ),
@@ -55,7 +63,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Info",
             ["File"],
             None,
-            "{} → {title, path, format, dirty, slides, hiddenSlides, sections, bytes?, properties}",
+            "{} → {title, path, label, format, dirty, slides, hiddenSlides, sections, bytes?, properties}",
             has_doc,
             info
         ),
@@ -212,11 +220,19 @@ pub fn read_presentation_file(path: &str) -> Result<LoadedFile> {
 /// Add a loaded presentation as the active document: the shared end of `file.open` and
 /// `file.adopt`. A damaged file opens as an untitled repaired copy, so Save can't overwrite the
 /// original with the empty media.
-fn adopt_loaded(s: &mut Session, f: LoadedFile) -> Result<Value> {
+fn adopt_loaded(s: &mut Session, f: LoadedFile, p: &Value) -> Result<Value> {
     let LoadedFile { path, doc, native, damaged } = f;
     let keep_path = native && damaged.is_empty();
     let i = add_opened(s, &path, keep_path.then(|| path.clone()), doc);
     report_damage(s, &damaged)?;
+    if keep_path {
+        let label = str_param(p, "label").map(|l| l.chars().take(200).collect::<String>()).filter(|l| !l.trim().is_empty());
+        let st = s.doc_mut()?;
+        st.location_label = label;
+        let doc = st.doc.clone();
+        // Add-ins that asked hear that a document was opened from a local file (protocol 1.2).
+        s.queue_event(crate::events::DOCUMENT_OPENED, &path, None, doc);
+    }
     let st = s.doc()?;
     Ok(json!({"document": i, "slides": st.doc.slides.len(), "missingFonts": st.missing_fonts, "damagedMedia": damaged}))
 }
@@ -224,7 +240,7 @@ fn adopt_loaded(s: &mut Session, f: LoadedFile) -> Result<Value> {
 #[cfg(not(target_arch = "wasm32"))]
 fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
-    adopt_loaded(s, read_presentation_file(path)?)
+    adopt_loaded(s, read_presentation_file(path)?, p)
 }
 
 /// `file.adopt {path, token?}`: add the presentation a host read in the background and staged
@@ -234,9 +250,9 @@ fn adopt(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.adopt", "missing `path`"))?;
     let staged = p.get("token").and_then(Value::as_u64).and_then(|t| s.take_loaded(t)).filter(|f| f.path == path);
     match staged {
-        Some(f) => adopt_loaded(s, f),
+        Some(f) => adopt_loaded(s, f, p),
         #[cfg(not(target_arch = "wasm32"))]
-        None => adopt_loaded(s, read_presentation_file(path)?),
+        None => adopt_loaded(s, read_presentation_file(path)?, p),
         #[cfg(target_arch = "wasm32")]
         None => Err(bad("file.adopt", format!("{path} was not loaded"))),
     }
@@ -356,6 +372,28 @@ pub fn pdf_bytes(doc: &Presentation, p: &Value) -> Result<Vec<u8>> {
     deckcraft_pdf::export(doc, &pdf_options(p, doc.slides.len())?).map_err(|e| EngineError::Other(e.to_string()))
 }
 
+/// The extensions File › Open reads: presentations, and outlines that become one.
+pub const OPENABLE_EXTENSIONS: &[&str] = &["deckcraft", "pptx", "potx", "ppsx", "pptm", "potm", "ppsm", "txt", "md"];
+
+/// Whether `path` names a file File › Open could open: absolute, existing, a regular file, with an
+/// extension it reads. The error says what's wrong.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn check_openable(path: &str) -> std::result::Result<(), String> {
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() {
+        return Err(format!("{path}: not an absolute path"));
+    }
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !OPENABLE_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!("{path}: DeckCraft doesn't open .{ext} files"));
+    }
+    match crate::io::is_regular_file(path) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("{path}: not a file")),
+        Err(e) => Err(e),
+    }
+}
+
 /// The output extensions [`format_for_path`] maps to a writer of that format.
 pub const WRITABLE_EXTENSIONS: &[&str] =
     &["deckcraft", "pptx", "potx", "ppsx", "pptm", "potm", "ppsm", "pdf", "png", "jpg", "jpeg", "gif", "txt", "md"];
@@ -398,6 +436,10 @@ fn mark_saved(s: &mut Session, path: Option<String>) -> Result<()> {
     let st = s.doc_mut()?;
     st.saved_doc = st.doc.clone();
     if path.is_some() {
+        // Saved somewhere else: where an add-in said it came from no longer holds.
+        if st.path != path {
+            st.location_label = None;
+        }
         st.path = path;
     }
     st.revision += 1;
@@ -472,6 +514,10 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
     let bytes = save_bytes(&s.doc()?.doc, &format)?;
     write_file(&path, &bytes)?;
     mark_saved(s, Some(path.clone()))?;
+    // Add-ins that asked hear about the save (protocol 1.2); autosave isn't a save.
+    let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let doc = s.doc()?.doc.clone();
+    s.queue_event(crate::events::DOCUMENT_SAVED, &path, Some(&ext), doc);
     let renamed_from = (path != asked).then_some(asked);
     Ok(json!({"path": path, "bytes": bytes.len(), "renamedFrom": renamed_from}))
 }
@@ -632,6 +678,7 @@ fn info(s: &mut Session, _p: &Value) -> Result<Value> {
     Ok(json!({
         "title": st.title(),
         "path": st.path,
+        "label": st.location_label,
         "format": st.path.as_deref().map(format_for_path),
         "dirty": st.is_dirty(),
         "slides": doc.slides.len(),
@@ -644,6 +691,9 @@ fn info(s: &mut Session, _p: &Value) -> Result<Value> {
 
 fn close(s: &mut Session, _p: &Value) -> Result<Value> {
     if let Some(i) = s.active_index() {
+        if let Some((path, doc)) = s.active().and_then(|d| Some((d.path.clone()?, d.doc.clone()))) {
+            s.queue_event(crate::events::DOCUMENT_CLOSED, &path, None, doc);
+        }
         s.close_document(i);
     }
     ok()

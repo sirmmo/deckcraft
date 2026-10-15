@@ -1,6 +1,6 @@
 # Add-ins, Office add-ins and macros
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-15 · **Change:** minor (ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 DeckCraft runs three kinds of extension, all as **add-ins** listed in the Add-ins window (Insert ›
 Add-ins, Developer › Add-ins):
@@ -44,16 +44,19 @@ reads:
 | `commands` | `[{id, label, description, params}]`, run by `plugins.run` |
 | `ui` / `uiFor.deckcraft` | Ribbon groups (`tab`: Home, Insert, Draw, Design, Transitions, Animations, Slide Show, Record, Review, View, or a new tab) and right-click items (`menu`: `shape`, `slide`, `text`) |
 | `macros` | `{language}`: the add-in runs macros (protocol 1.1) |
+| `events` | `["documentOpened", "documentSaved", "documentClosed"]`: the document events it hears (protocol 1.2); other names are kept and ignored |
 | `functions` | GridCraft's spreadsheet functions: accepted, not used |
 
 ## The protocol
 
 JSON-RPC 2.0, one message per line on the add-in's standard input and output.
 
-- `initialize {protocolVersion: 1, host: {id: "deckcraft", name, version}, plugin: {id, dir}}`.
+- `initialize {protocolVersion: 1, host: {id: "deckcraft", name, version, features, language}, plugin: {id, dir}}`.
+  `features` is `["dialogs", "open", "events", "document"]` (protocol 1.2), `language` the UI's
+  BCP 47 tag (`en`: DeckCraft's interface is English).
   The environment also has `CRAFT_HOST=deckcraft` and `CRAFT_PLUGIN_DIR`.
 - `commands/run {command, params, context}` → `{commands: [{command, params}], message?, result?}`.
-  `context` is `{presentation, slide (0-based), slideId, slides, titles: [slide titles], selection: [shape ids], text}`.
+  `context` is `{document, presentation, slide (0-based), slideId, slides, titles: [slide titles], selection: [shape ids], text}`.
   The answered commands are DeckCraft's own (`slide.new`, `insert.textBox`, `shape.fill`…; not
   `plugins.*` or `developer.*`) and run as **one undoable step**; if one fails, nothing changes.
 
@@ -69,6 +72,43 @@ requests of its own; DeckCraft answers them, then waits again:
 | `host/log {text}` | `{}`: written to the log |
 
 What the add-in changes this way is part of the running command's one undo step.
+
+**Protocol 1.2: dialogs, opening files, document events.** The craft apps' shared contract
+(craft-nextcloud's `docs/host-protocol-1.2.md`); DeckCraft does it as follows.
+
+- **`context.document`** `{path, name, dirty}` in `commands/run`'s and `macros/run`'s `context`
+  (`macros/run` gets `context: {document}`): `path` the file it was opened from or last saved to,
+  `null` for a new presentation (then `name` is its title, `Presentation1`).
+- **`open {path, label?, readOnly?}`** in a command's result: after the step, if it succeeded,
+  DeckCraft opens the file as File › Open does (in the background, in a new window, added to
+  Recent). The path must be absolute, an existing regular file, and `.deckcraft`, `.pptx`, `.potx`,
+  `.ppsx`, `.pptm`, `.potm`, `.ppsm`, `.txt` or `.md`; otherwise the command fails and nothing
+  changes. `label` (at most 200 characters) shows as the Location in File › Info (the path is its
+  tooltip) until the presentation is saved elsewhere; `file.open` and `file.adopt` take it as
+  `label`, `file.info` returns it. `readOnly` is ignored: DeckCraft has no read-only mode.
+- **`dialog`** in a command's result: DeckCraft draws a modal in its own widgets and theme:
+  `list` (icon, label and detail per item, a filter box above 20 items, `multi` for several),
+  `form` (`text`, `secret`, `number`, `checkbox`, `choice` fields) or `message`; OK, a double-click
+  on an item and up to 4 extra buttons run the add-in's command the same way as a ribbon button,
+  with `id`/`ids` for a list's selection and `fields` for a form, so dialogs chain. Cancel, Escape
+  and a click outside close it. If the command fails, the dialog comes back with the reason. Text
+  over a limit is cut; a malformed dialog, or one whose buttons run commands the add-in doesn't
+  declare, fails the command.
+- A result may combine fields (`open` + `message`, `dialog` + `result` + `message` + `commands`):
+  each is done. A **programmatic** `plugins.run` (CLI, MCP, control channel) opens and shows
+  nothing: it returns `open` and `dialog` in its result for the caller.
+- **Events**: `events/documentOpened {path, name}` (File › Open, Recent, a presentation dropped
+  from the file manager, an add-in's `open`), `events/documentSaved {path, name, format}` (Save,
+  Save As, Save as Template; not AutoRecover) and `events/documentClosed {path, name}` (File ›
+  Close, and quitting, for each open presentation that has a file), to each loaded, active add-in
+  that declares it. They go out after the command, from a background thread, in order: a slow or
+  failing add-in never holds up or fails the save, open or close, and an event is no undo step.
+  Opened and saved time out after 30 s, closed after 5 s; quitting waits at most 5 s. The answer's
+  `message` shows in the status bar, an error as a notice. During an event `host/log` and
+  `host/message` work, `host/sync` reads the presentation as it was when the event happened and
+  is refused anything that changes it (`AccessDenied`), `host/vbaProject/get` reads and
+  `host/vbaProject/set` is refused (`AccessDenied`). `deckcraft-cli run` waits for events before it
+  exits.
 
 **Macros** (`"macros"` in the manifest): `macros/list`, `macros/run {name, control?: {id, tag}}`,
 `macros/modules`, `macros/saveModule {name, source}`, `macros/deleteModule {name}`,
@@ -168,5 +208,6 @@ A macro is one undo step; a run-time error takes everything it did back
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Protocol 1.2: `host.features` and `host.language`, `context.document`, command results `open` and `dialog` (host-drawn list, form and message dialogs that chain), manifest `events` and `events/documentOpened`, `documentSaved`, `documentClosed` |
 | 2026-10-15 | minor | Ribbon buttons that run macros (`customUI14.xml`, `macros/run` gets `control`); Record Macro and `developer.recordToCode` (`macros/record`), a DeckCraft extra |
 | 2026-10-14 | major | First version: add-ins (shared manifest and protocol 1 and 1.1), Office add-ins' task panes with DeckCraft's Office.js, VBA macros through craft-vba, the Developer tab |
