@@ -1235,6 +1235,7 @@ dependencies = [
 name = "deckcraft-office-js"
 version = "0.7.0"
 dependencies = [
+ "deckcraft-plugin",
  "js-sys",
  "serde_json",
  "wasm-bindgen",

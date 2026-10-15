@@ -324,9 +324,16 @@ pub fn enum_from_wire(v: &Json) -> Json {
     }
 }
 
-/// The requirement sets reported as supported, with the highest version.
+/// The requirement sets reported as supported, with the highest version. The plugin host checks
+/// Office add-ins' `<Requirements>` against the same table (`deckcraft_plugin::office::API_SETS`;
+/// a test keeps them equal).
 pub const REQUIREMENT_SETS: &[(&str, (u32, u32))] =
     &[("PowerPointApi", (1, 4)), ("Settings", (1, 1)), ("Selection", (1, 1)), ("TextCoercion", (1, 1))];
+
+/// The Common API methods this library implements (`<Requirements><Methods>`), as the plugin
+/// host checks them (`deckcraft_plugin::office::API_METHODS`).
+pub const SUPPORTED_METHODS: &[&str] =
+    &["Document.getSelectedDataAsync", "Document.setSelectedDataAsync", "Settings.get", "Settings.set", "Settings.remove", "Settings.saveAsync"];
 
 /// `Office.context.requirements.isSetSupported(name, minVersion)`.
 pub fn is_set_supported(name: &str, min: Option<&str>) -> bool {
@@ -343,6 +350,17 @@ fn version(v: &str) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plugin host blocks Office add-ins that need more than this library reports: both read
+    /// the same table.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_plugin_host_checks_the_same_requirement_sets() {
+        let host: Vec<(String, (u64, u64))> = deckcraft_plugin::office::API_SETS.iter().map(|(n, v)| (n.to_string(), *v)).collect();
+        let here: Vec<(String, (u64, u64))> = REQUIREMENT_SETS.iter().map(|(n, (a, b))| (n.to_string(), (u64::from(*a), u64::from(*b)))).collect();
+        assert_eq!(host, here);
+        assert_eq!(deckcraft_plugin::office::API_METHODS, SUPPORTED_METHODS);
+    }
 
     fn shapes() -> Path {
         vec![prop("presentation"), prop("slides"), method("getItemAt", vec![json!(0)]), prop("shapes")]

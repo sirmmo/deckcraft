@@ -106,6 +106,9 @@ fn sync(s: &mut Session, p: &Json) -> Result<Json> {
     if !plugin.enabled() {
         return Err(bad(ID, format!("{addin} is turned off")));
     }
+    if let Some(b) = plugin.blocked_by().first() {
+        return Err(bad(ID, format!("{addin} is blocked: {}", b.message)));
+    }
     let actions: Vec<Action> =
         serde_json::from_value(p.get("actions").cloned().unwrap_or(Json::Array(Vec::new()))).map_err(|e| bad(ID, format!("`actions`: {e}")))?;
     if actions.len() > MAX_ACTIONS {

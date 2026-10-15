@@ -42,6 +42,11 @@ js-sys = "0.3"
 name = "addins"
 harness = false
 
+# Runs without libtest: the test binary doubles as the add-ins whose requirements it checks.
+[[test]]
+name = "plugin_requires"
+harness = false
+
 # Runs without libtest: the test binary doubles as the co-editing transport it starts.
 [[test]]
 name = "collab_push"

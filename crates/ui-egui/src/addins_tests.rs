@@ -414,3 +414,57 @@ fn an_add_ins_dialog_is_bounded_and_filters_long_lists() {
     let msg = Dialog::parse(&json!({"kind": "message", "prompt": "Done"})).unwrap();
     assert_eq!(super::PluginDialog::new("t.x", msg).action(None).unwrap(), None, "a message's OK just closes");
 }
+
+#[test]
+fn blocked_add_ins_say_why_and_offer_to_install_what_they_need() {
+    let _one_at_a_time = ADDINS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = deckcraft_engine::plugin::Manifest::parse(
+        r#"{"id": "t.ui-reports", "name": "Reports", "version": "1.4.0", "run": {"command": "./not-started"},
+            "commands": [{"id": "go", "label": "Go"}],
+            "ui": {"ribbon": [{"tab": "Insert", "group": "R", "buttons": [{"command": "go", "label": "Reports Button"}]}],
+                   "menus": [{"menu": "shape", "command": "go"}]},
+            "requires": {"addins": [
+                {"id": "t.ui-vba", "version": "^0.1.4", "github": "sirmmo/craft-vba", "why": "Runs the report macros"},
+                {"id": "t.ui-mqtt", "version": "*", "github": "sirmmo/craft-collab", "optional": true}]}}"#,
+    )
+    .unwrap();
+    deckcraft_engine::plugin::install(m, std::env::temp_dir()).unwrap();
+    let _unload = (Unload("t.ui-reports"), Unload("t.ui-vba"));
+    assert!(super::groups("Insert").is_empty(), "a blocked add-in's ribbon group is absent");
+    assert!(super::menu_items(deckcraft_engine::plugin::MenuKind::Shape).is_empty(), "and its menu items");
+    let mut h = harness(Session::with_new(), Services::default());
+    h.state_mut().addins.window = true;
+    h.run_steps(3);
+    assert!(h.query_by_label("Blocked · t.ui-reports").is_some());
+    assert!(h.query_by_label("Needs craft-vba, which isn't installed").is_some());
+    h.get_by_label("Install Missing").click();
+    h.run_steps(3);
+    let offer = h.state().addins.install.offer.as_ref().expect("Install Missing offers the missing add-ins");
+    assert_eq!(offer.plugin, "t.ui-reports");
+    let ticked: Vec<(&str, bool)> = offer.items.iter().map(|(m, on)| (m.id.as_str(), *on)).collect();
+    assert_eq!(ticked, [("t.ui-vba", true), ("t.ui-mqtt", false)], "optional add-ins are offered unticked");
+    assert!(h.query_by_label("Reports needs craft-vba ^0.1.4 (Runs the report macros). Install it too?").is_some());
+    assert!(h.query_by_label("Reports can use craft-collab *. Install it too?").is_some());
+    h.get_by_label("Not Now").click();
+    h.run_steps(3);
+    assert!(h.state().addins.install.offer.is_none());
+
+    // Once the required add-in is there, the add-in unblocks; turning that one off asks first.
+    let vba = deckcraft_engine::plugin::Manifest::parse(
+        r#"{"id": "t.ui-vba", "name": "craft-vba", "version": "0.1.5", "run": {"command": "./not-started"}}"#,
+    )
+    .unwrap();
+    deckcraft_engine::plugin::install(vba, std::env::temp_dir()).unwrap();
+    h.run_steps(3);
+    assert!(h.query_by_label("Install Missing").is_none());
+    assert_eq!(super::groups("Insert").len(), 1, "unblocked without a restart");
+    let deactivate = h.query_all_by_label("Deactivate").last().expect("the second card's button");
+    deactivate.click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Reports needs craft-vba. Turn both off?").is_some());
+    assert!(deckcraft_engine::plugin::get("t.ui-vba").unwrap().enabled(), "nothing is turned off before the answer");
+    h.get_by_label("Turn Both Off").click();
+    h.run_steps(3);
+    assert!(!deckcraft_engine::plugin::get("t.ui-vba").unwrap().enabled());
+    assert!(!deckcraft_engine::plugin::get("t.ui-reports").unwrap().enabled());
+}

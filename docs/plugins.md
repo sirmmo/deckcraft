@@ -1,6 +1,6 @@
 # Add-ins, Office add-ins and macros
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (protocol 2: the push channel and co-editing transports; previously patch: events refuse `host/sync` and the VBA project, reads too; no-op commands are no edit; previously minor: protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (manifest 1.3: add-ins that require other add-ins, with version ranges; previously minor: protocol 2: the push channel and co-editing transports; previously patch: events refuse `host/sync` and the VBA project, reads too; no-op commands are no edit; previously minor: protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 DeckCraft runs three kinds of extension, all as **add-ins** listed in the Add-ins window (Insert ›
 Add-ins, Developer › Add-ins):
@@ -31,6 +31,18 @@ installing one from GitHub. The web app can't run add-ins.
 - **Activate / Deactivate** (`plugins.setEnabled`) is remembered in the preferences; **Unload**
   lasts until the next start.
 
+| Command | Params | Does |
+|---|---|---|
+| `plugins.list` | `{}` | The loaded add-ins with their status, `state` (`loaded`, `running`, `failed`, `blocked`, `disabled`), `blockedBy`, `requires`, `requiredBy`, commands and ribbon |
+| `plugins.load` | `{path, force?}` | Loads the add-in in a folder (or a manifest file). An add-in with the same id is replaced; with a version outside the range a turned-on add-in requires, only with `force` |
+| `plugins.install` | `{url (or github), dir?, version?, withRequirements?, force?}` | Installs the add-in in a GitHub repository into `dir` (default: `<settings>/plugins/`) and loads it. The result adds `release` and `missing`; see [Requirements](#requirements-manifest-13) |
+| `plugins.installMissing` | `{id, dir?, force?}` | Installs the missing required add-ins of `id` that name `github` |
+| `plugins.requirements` | `{id}` | `{id, satisfied, blockedBy, tree}`: what `id` needs and what's installed |
+| `plugins.unload` | `{id}` | Unloads an add-in and stops its process (until the next start); `dependentsBlocked` lists the add-ins that needed it |
+| `plugins.setEnabled` | `{id, enabled}` | Turns an add-in off or back on, and remembers it in the preferences; turning off reports `dependentsBlocked` |
+| `plugins.openHomepage` | `{id}` | Opens the add-in's web page in the browser |
+| `plugins.run` | `{plugin, command, params?}` | Runs an add-in command (one undoable step) |
+
 ## The manifest (`plugin.json`)
 
 Shared with the other craft apps; see GridCraft's `docs/plugins.md` for every field. What DeckCraft
@@ -47,15 +59,22 @@ reads:
 | `events` | `["documentOpened", "documentSaved", "documentClosed"]`: the document events it hears (protocol 1.2); other names are kept and ignored |
 | `collab` | `{transport, label}`: the add-in is a co-editing transport (protocol 2); only such an add-in may join rooms, and the Share window lists it by `label` |
 | `functions` | GridCraft's spreadsheet functions: accepted, not used |
+| `requires.apps` | Manifest 1.3. Per app id, the app versions the add-in works with (`{"deckcraft": ">=0.7.0"}`); an app missing from the map isn't constrained. See [Requirements](#requirements-manifest-13) |
+| `requires.protocol` | The plugin protocol versions it needs (`">=1.2"`), checked against `host.protocol` (`"2.0"`) |
+| `requires.features` | Names from `host.features` (`dialogs`, `open`, `events`, `document`, `push`, `collab`) that must all be present |
+| `requires.addins[]` | Other add-ins it needs: `id`, `version` (a range; default `*`), `github` (`owner/repo` to install it from), `optional` (default false), `why` (shown to the person, at most 200 characters). At most 32 |
 
 ## The protocol
 
 JSON-RPC 2.0, one message per line on the add-in's standard input and output.
 
-- `initialize {protocolVersion: 1, host: {id: "deckcraft", name, version, features, language, collab}, plugin: {id, dir}}`.
+- `initialize {protocolVersion: 1, host: {id: "deckcraft", name, version, protocol, features, language, collab}, plugin: {id, dir}, addins}`.
   `features` is `["dialogs", "open", "events", "document", "push", "collab"]` (protocols 1.2 and
   2), `language` the UI's BCP 47 tag (`en`: DeckCraft's interface is English), `collab` what
-  co-editing DeckCraft speaks (protocol 2, below).
+  co-editing DeckCraft speaks (protocol 2, below). Since manifest 1.3, `protocol` is the protocol
+  version as text (`"2.0"`, what `requires.protocol` is checked against), and `addins` lists every
+  installed add-in as `{id, version, enabled}` (`enabled`: turned on, not blocked and not failed),
+  so an add-in can adapt to the optional ones it found.
   The environment also has `CRAFT_HOST=deckcraft` and `CRAFT_PLUGIN_DIR`.
 - `commands/run {command, params, context}` → `{commands: [{command, params}], message?, result?}`.
   `context` is `{document, presentation, slide (0-based), slideId, slides, titles: [slide titles], selection: [shape ids], text}`.
@@ -187,6 +206,82 @@ DeckCraft's shared document (schema 1), commands and behaviour: [collab.md](coll
 transport that relays between two rooms is `crates/engine/tests/collab_push.rs`;
 [craft-collab](https://github.com/sirmmo/craft-collab) has MQTT and loopback transports.
 
+## Requirements (manifest 1.3)
+
+An add-in can say which other add-ins it needs, in which versions, and which app versions and
+protocol features. DeckCraft checks this before starting it, says what's missing, and offers to
+install it. The contract is shared with GridCraft and WordCraft:
+[Craft plugin manifests 1.3](https://github.com/sirmmo/craft-collab/blob/main/docs/plugin-requirements.md).
+
+```json
+{
+  "id": "org.example.reports",
+  "version": "1.4.0",
+  "requires": {
+    "apps": {"deckcraft": ">=0.7.0", "wordcraft": ">=0.7.0"},
+    "protocol": ">=1.2",
+    "features": ["dialogs", "events"],
+    "addins": [
+      {"id": "org.craft.vba", "version": "^0.1.4", "github": "sirmmo/craft-vba", "why": "Runs the report macros"},
+      {"id": "org.craft.mqtt", "version": ">=0.1, <0.3", "github": "sirmmo/craft-collab", "optional": true, "why": "Live editing"}
+    ]
+  }
+}
+```
+
+**Versions** are `MAJOR.MINOR.PATCH`; missing parts are 0, a pre-release (`1.0.0-beta.1`) sorts
+before its release, `+build` is ignored, and an Office add-in's `1.0.0.0` compares on its first
+three parts. **Ranges** are Cargo's: comma-separated comparators that must all hold. `^1.2.3` (also
+a bare `1.2.3`) is `>=1.2.3, <2.0.0`, and for 0.x `^0.1.4` is `>=0.1.4, <0.2.0`; `~1.2.3` is
+`>=1.2.3, <1.3.0`; `>=`, `>`, `<=`, `<`, `=` take a full or partial version (`>=0.1` is `>=0.1.0`;
+as in Cargo, `=1.2` and `<=1.2` mean `1.2.*`, `>1.2` means `>=1.3.0`); `1.*` and `1.2.*` are
+wildcards; `*` or nothing is any version, pre-releases included. Otherwise a pre-release only
+matches a comparator that names a pre-release of the same version (`>=1.0.0-rc.1`). For the
+protocol write `>=1.2`: Cargo's `^1.2` leaves out 2.0. Ranges are at most 128 characters.
+
+**Blocked.** Whenever the add-ins change (start-up, install, `plugins.load`, turning one on or
+off, unloading, one failing for good), DeckCraft resolves them all together. An add-in is
+**blocked**, with its reasons in `blockedBy` and in the Add-ins window, when:
+
+| `kind` | When | Message |
+|---|---|---|
+| `app` | `requires.apps.deckcraft` doesn't match this version | Needs DeckCraft 0.8 or later (this is 0.7.0) |
+| `protocol` | `requires.protocol` doesn't match `host.protocol` | Needs plugin protocol 3.0 or later (this DeckCraft has 2.0) |
+| `feature` | A name in `requires.features` isn't in `host.features`; an Office add-in's requirement set or method isn't supported | Needs `x`, which this DeckCraft doesn't have |
+| `addin` | A required (not optional) add-in isn't installed, is turned off, failed, is blocked itself, or its version is out of range | Needs craft-vba ^0.1.4 (installed: 0.1.3) |
+| `cycle` | Required add-ins need each other | Requirement cycle: Reports → craft-vba → Reports |
+| `depth` | The chain of required add-ins below it is more than 8 deep | Its required add-ins go 9 deep (at most 8) |
+| `range` | A range in its manifest doesn't parse | Its manifest's requirement for craft-vba (`soon`) isn't a version range |
+
+A blocked add-in isn't started; its commands, ribbon groups, menu items, events, macros, task
+panes and co-editing transport are absent, as for an add-in that's turned off. Installing what it
+needs unblocks it at once, without restarting. Optional add-ins never block. Required add-ins
+start before the add-ins that need them.
+
+**Turning off or unloading** an add-in others need asks first in the Add-ins window ("Reports
+needs craft-vba. Turn both off?"). Programmatically it just happens: the add-ins that needed it
+are blocked, and the result's `dependentsBlocked` lists them. **Installing or updating** an add-in
+to a version a turned-on add-in's range doesn't accept asks first ("Reports needs craft-vba
+^0.1.4; 0.2.0 doesn't match. Install craft-vba 0.2.0 anyway?"); programmatically
+(`plugins.install`, `plugins.load`) it fails unless `force: true`, and then that add-in is blocked.
+
+**Installing what's missing.** After installing an add-in from GitHub, DeckCraft offers its
+missing or out-of-range required add-ins that name `github` ("Reports needs craft-vba ^0.1.4 (Runs
+the report macros). Install it too?"), ticked; optional ones are offered unticked. For each it
+takes **the newest release whose tag is a version in range** (`v0.1.5` or `0.1.5`; drafts are
+skipped, and so are pre-releases unless the range names one; one page of the newest 100 releases
+is read), not just the latest, and says which. What they need in turn is offered next. A blocked
+add-in whose missing add-ins name `github` shows **Install Missing** in the Add-ins window.
+
+| Command | Does |
+|---|---|
+| `plugins.install {url, withRequirements?, force?, version?}` | `withRequirements` (default false here; the interface always asks) also installs the missing required add-ins that name `github`, with `installed` and `failed` in the result. The result always lists `missing` (`[{id, name, version, github?, optional, why, installed?}]`) for the caller to install. `version`, a range, picks the newest release in it |
+| `plugins.installMissing {id, force?}` | Installs `id`'s missing required add-ins that name `github`, then theirs (at most 8 deep): `{installed: [{id, name, version, release}], failed: [{id, error}], missing, satisfied}` |
+| `plugins.requirements {id}` | `{id, satisfied, blockedBy, tree: [{id, name, need, have, state, optional, why, github, children}]}`; `state` is `missing` for an add-in that isn't installed |
+| `plugins.list` | Per add-in: `state` (`blocked` among `loaded`, `running`, `failed`, `disabled`), `blockedBy: [{id?, kind, need, have?, message}]`, `requires` (the manifest's), `requiredBy` (the ids of the add-ins that need it) |
+
+Office add-ins' `<Requirements>` are checked the same way (below).
+
 ## Office add-ins
 
 An Office add-in's `manifest.xml` (with `<Host Name="Presentation"/>` and `https://` pages) becomes
@@ -224,6 +319,19 @@ The common API: `Office.onReady`, `Office.context.document.getSelectedDataAsync`
 (text), `settings` (kept per open presentation until it closes), `requirements.isSetSupported`.
 A shape added earlier in the same sync is named by that action's result (`getItem({"result": i})`).
 
+Requirement sets reported as supported: **PowerPointApi 1.1–1.4**, and Settings, Selection and
+TextCoercion 1.1; methods: `Document.getSelectedDataAsync`, `Document.setSelectedDataAsync`,
+`Settings.get`, `set`, `remove`, `saveAsync`. **Requirements.** The manifest's `<Requirements>`
+are checked when the add-in loads, against that one table (`deckcraft_plugin::office::API_SETS`
+and `API_METHODS`, which `isSetSupported` answers from too; a test keeps them equal). `<Sets>`
+lists `<Set Name="PowerPointApi" MinVersion="1.3"/>`; a set without `MinVersion` takes the
+`<Sets DefaultMinVersion="…">` (else 1.1). `<Methods>` lists
+`<Method Name="Document.getSelectedDataAsync"/>`. An unmet one makes the add-in **blocked**
+([Requirements](#requirements-manifest-13)): it stays listed in the Add-ins window with the reason
+("Needs PowerPointApi 1.9; DeckCraft supports up to 1.4", "Needs WordApi 1.1, which DeckCraft
+doesn't support"), and its buttons, menu items and task panes are absent, instead of failing at its
+first call. `plugins.list` reports it as `state: "blocked"` with `blockedBy` (kind `feature`).
+
 **Not yet:** events, dialogs (`displayDialogAsync`), tags, `insertSlidesFromBase64`, hyperlinks,
 settings saved in the file, the unified (JSON) manifest, and a web view on Linux.
 
@@ -241,6 +349,7 @@ A macro is one undo step; a run-time error takes everything it did back
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Manifest 1.3: `requires` (apps, protocol, features, other add-ins with Cargo-style version ranges), blocked add-ins (`state`, `blockedBy`, `requiredBy`), start order, `host.protocol` and `addins` in `initialize`, `plugins.requirements`, `plugins.installMissing`, `plugins.install` `github`/`withRequirements`/`force`/`version` (newest release in range), `plugins.load` `force`, Install Missing, asking before turning off a needed add-in or updating out of range; Office add-ins' requirement sets and methods (PowerPointApi); a command table |
 | 2026-10-15 | minor | Protocol 2: the push channel (add-ins speak any time; `host.features` `push`, `collab`; `host.collab`), manifest `collab` (transports), `collab.join` in command results; co-editing in [collab.md](collab.md) |
 | 2026-10-15 | patch | Aligned with GridCraft and WordCraft: during document events `host/sync` and `host/vbaProject/*` are refused, reads too; a command that changes nothing makes no undo step |
 | 2026-10-15 | minor | Protocol 1.2: `host.features` and `host.language`, `context.document`, command results `open` and `dialog` (host-drawn list, form and message dialogs that chain), manifest `events` and `events/documentOpened`, `documentSaved`, `documentClosed` |

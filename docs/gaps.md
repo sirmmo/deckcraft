@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2: dialogs, opening files, document events; previously minor: ribbon buttons that run macros, saved as `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (add-ins that require other add-ins, manifest 1.3; previously minor: live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2: dialogs, opening files, document events; previously minor: ribbon buttons that run macros, saved as `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -344,10 +344,16 @@ Detail in [localization-parity.md](localization-parity.md).
   macros (Developer › Ribbon Buttons, saved as the package's `customUI14.xml` so PowerPoint shows
   them too) and Record Macro (a DeckCraft extra: PowerPoint has no recorder). Add-ins speak the
   craft apps' protocol 1.2 too: host-drawn dialogs, opening files, document events, and protocol 2:
-  live co-editing through transport add-ins ([collab.md](collab.md)). The owner reversed
+  live co-editing through transport add-ins ([collab.md](collab.md)), and manifest 1.3: add-ins
+  require other add-ins with Cargo-style version ranges, app versions, protocol and features;
+  unmet ones are blocked with the reason, installing the missing ones from their newest GitHub
+  release in range (Install Missing); Office add-ins' requirement sets are checked
+  ([plugins.md](plugins.md#requirements-manifest-13)). The owner reversed
   the earlier "out of scope" policy on 2026-10-14 ([plugins.md](plugins.md)). Missing: Office.js
   events, dialogs, tags and `insertSlidesFromBase64`; a Linux web view; editing a ribbon richer
-  than tabs, groups and buttons; VBA's UserForms, events and partial-text formatting. 12–25 h.
+  than tabs, groups and buttons; VBA's UserForms, events and partial-text formatting; updating
+  installed add-ins (no update check) and more than one page (100) of a repository's releases.
+  12–25 h.
 - **Six original starter decks; PowerPoint's large template gallery remains.** File › New and the
   start screen offer Briefing, Lesson, Pitch, Field Notes, Quarterly and Evening Talk
   (`file.new {template}`), each a few slides on one of our themes. Dozens of further offline
@@ -373,6 +379,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Add-ins entry: manifest 1.3 (add-ins require other add-ins: version ranges, blocked add-ins with reasons, start order, Install Missing from the newest release in range; Office add-ins' requirement sets checked) |
 | 2026-10-15 | minor | Live co-editing (plugin protocol 2): new Ecosystem entry; the add-ins entry mentions it |
 | 2026-10-15 | minor | Add-in protocol 1.2 (dialogs, opening files, document events) |
 | 2026-10-15 | minor | Ribbon buttons that run macros (`customUI14.xml` read and written) and Record Macro: the ribbon-buttons and `customUI` gap closed |

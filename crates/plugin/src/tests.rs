@@ -104,6 +104,7 @@ fn command_replies_are_checked() {
 fn initialize_announces_protocols_1_2_and_2() {
     let p = crate::initialize_params("t.init", std::path::Path::new("/tmp"));
     assert_eq!(p["protocolVersion"], 1, "protocolVersion stays 1");
+    assert_eq!(p["host"]["protocol"], "2.0", "manifests 1.3: host.protocol");
     assert_eq!(p["host"]["features"], json!(["dialogs", "open", "events", "document", "push", "collab"]));
     assert_eq!(p["host"]["collab"], json!({"formats": ["yjs-v1"], "app": "deckcraft", "schema": 1, "encryption": ["aes-256-gcm"]}));
     assert_eq!(p["host"]["language"], "en");
@@ -495,6 +496,32 @@ mod office {
     }
 
     #[test]
+    fn unmet_requirement_sets_block_the_add_in() {
+        let xml = MANIFEST.replace("0d5c7a1e-1111-4bcd-9eaf-0123456789ab", "0d5c7a1e-2222-4bcd-9eaf-0123456789ab").replace(
+            r#"<Requirements><Sets DefaultMinVersion="1.1"><Set Name="PowerPointApi" MinVersion="1.3"/></Sets></Requirements>"#,
+            r#"<Requirements><Sets DefaultMinVersion="1.9"><Set Name="PowerPointApi"/><Set Name="Selection" MinVersion="1.1"/></Sets>
+               <Methods><Method Name="Document.getSelectedDataAsync"/><Method Name="Document.goToByIdAsync"/></Methods></Requirements>"#,
+        );
+        assert_ne!(xml, MANIFEST);
+        let m = parse_manifest(&xml, "deckcraft").unwrap();
+        let o = m.office.as_ref().unwrap();
+        assert_eq!(
+            o.requirements,
+            [("PowerPointApi".to_string(), "1.9".to_string()), ("Selection".to_string(), "1.1".to_string())],
+            "DefaultMinVersion applies"
+        );
+        assert_eq!(o.methods, ["Document.getSelectedDataAsync", "Document.goToByIdAsync"]);
+        let id = m.id.clone();
+        crate::install(m, std::env::temp_dir()).unwrap();
+        let p = crate::get(&id).unwrap();
+        assert_eq!(p.state(), "blocked");
+        let why: Vec<String> = p.blocked_by().iter().map(|b| b.message.clone()).collect();
+        assert_eq!(why, ["Needs PowerPointApi 1.9; DeckCraft supports up to 1.4", "Needs Document.goToByIdAsync, which DeckCraft doesn't support"]);
+        assert!(run_command(&id, "taskpane", serde_json::json!({}), serde_json::json!({})).unwrap_err().contains("blocked"));
+        assert!(crate::unload(&id));
+    }
+
+    #[test]
     fn sync_actions_read_as_json() {
         let a: Vec<Action> = serde_json::from_str(
             r#"[{"op":"load","path":[{"p":"presentation"},{"m":"getSelectedShapes"}],"props":["items","name"]},
@@ -504,5 +531,125 @@ mod office {
         .unwrap();
         assert!(matches!(&a[1], Action::Set { prop, .. } if prop == "left"));
         assert!(matches!(&a[0], Action::Load { path, .. } if path[1] == Step::Method { m: "getSelectedShapes".into(), a: vec![] }));
+    }
+}
+
+// ---------------------------------------------------------------- requirements (manifest 1.3)
+
+mod requirements {
+    use serde_json::json;
+
+    use crate::Manifest;
+
+    fn add(id: &str, version: &str, extra: serde_json::Value) {
+        let mut m = json!({"id": id, "name": id.rsplit('.').next().unwrap_or(id), "version": version, "run": {"command": "./not-started"}});
+        if let (Some(m), Some(extra)) = (m.as_object_mut(), extra.as_object()) {
+            m.extend(extra.clone());
+        }
+        crate::install(Manifest::parse(&m.to_string()).unwrap(), std::env::temp_dir()).unwrap();
+    }
+
+    fn messages(id: &str) -> Vec<String> {
+        crate::get(id).unwrap().blocked_by().iter().map(|b| b.message.clone()).collect()
+    }
+
+    #[test]
+    fn blocked_add_ins_lose_their_commands_until_what_they_need_arrives() {
+        add(
+            "t.req.reports",
+            "1.4.0",
+            json!({"commands": [{"id": "go", "label": "Go"}], "events": ["documentSaved"], "macros": {"language": "VBA"},
+                   "requires": {"addins": [{"id": "t.req.vba", "version": "^0.1.4", "github": "sirmmo/craft-vba", "why": "Runs the report macros"}]}}),
+        );
+        let reports = crate::get("t.req.reports").unwrap();
+        assert_eq!(reports.state(), "blocked");
+        assert!(!reports.active() && reports.enabled());
+        assert_eq!(messages("t.req.reports"), ["Needs craft-vba, which isn't installed"]);
+        assert!(crate::run_command("t.req.reports", "go", json!({}), json!({})).unwrap_err().contains("blocked"));
+        assert!(!crate::listeners("documentSaved").contains(&"t.req.reports".to_string()), "a blocked add-in hears no events");
+        assert!(!crate::macro_plugins().iter().any(|(id, _)| id == "t.req.reports"), "nor runs macros");
+        let info = reports.info();
+        assert_eq!(info["state"], "blocked");
+        assert_eq!(info["blockedBy"][0]["kind"], "addin");
+        assert_eq!(info["blockedBy"][0]["id"], "t.req.vba");
+        assert_eq!(info["requires"]["addins"][0]["github"], "sirmmo/craft-vba");
+        assert!(reports.status().starts_with("blocked: "));
+        let missing = crate::missing("t.req.reports");
+        assert_eq!((missing.len(), missing[0].name.as_str(), missing[0].version.as_str()), (1, "craft-vba", "^0.1.4"));
+
+        // Out of range: still blocked; an update out of range conflicts.
+        add("t.req.vba", "0.1.3", json!({}));
+        assert_eq!(messages("t.req.reports"), ["Needs vba ^0.1.4 (installed: 0.1.3)"]);
+        let newer = Manifest::parse(&json!({"id": "t.req.vba", "name": "vba", "version": "0.2.0", "run": {"command": "x"}}).to_string()).unwrap();
+        assert_eq!(crate::conflicts(&newer).len(), 1, "0.2.0 doesn't suit reports either");
+
+        // In range: unblocked without a restart.
+        add("t.req.vba", "0.1.5", json!({}));
+        assert!(reports.active(), "{:?}", messages("t.req.reports"));
+        assert_eq!(reports.state(), "loaded");
+        assert!(crate::listeners("documentSaved").contains(&"t.req.reports".to_string()));
+        assert_eq!(crate::required_by("t.req.vba"), ["t.req.reports"]);
+        assert_eq!(crate::get("t.req.vba").unwrap().info()["requiredBy"], json!(["t.req.reports"]));
+        let order = crate::start_order();
+        let at = |id: &str| order.iter().position(|x| x == id).unwrap();
+        assert!(at("t.req.vba") < at("t.req.reports"), "{order:?}");
+        let c = crate::conflicts(&newer);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].message, "reports needs vba ^0.1.4; 0.2.0 doesn't match");
+        let tree = crate::requirements("t.req.reports").unwrap();
+        assert_eq!(tree["satisfied"], true);
+        assert_eq!((tree["tree"][0]["have"].as_str(), tree["tree"][0]["state"].as_str()), (Some("0.1.5"), Some("loaded")));
+
+        // Turning the required one off blocks the dependent; back on unblocks it.
+        assert_eq!(crate::dependents("t.req.vba"), ["t.req.reports"]);
+        crate::set_enabled("t.req.vba", false).unwrap();
+        assert_eq!(messages("t.req.reports"), ["Needs vba, which is turned off"]);
+        crate::set_enabled("t.req.vba", true).unwrap();
+        assert!(reports.active());
+        // A required add-in that fails for good blocks its dependents too.
+        crate::get("t.req.vba").unwrap().fail("flooded the app");
+        assert_eq!(messages("t.req.reports"), ["Needs vba, which has failed"]);
+        crate::set_enabled("t.req.vba", false).unwrap();
+        crate::set_enabled("t.req.vba", true).unwrap();
+        assert!(reports.active(), "turning it off and on gives it a fresh start");
+
+        // Unloading it blocks the dependent again.
+        assert!(crate::unload("t.req.vba"));
+        assert_eq!(messages("t.req.reports"), ["Needs craft-vba, which isn't installed"]);
+        let tree = crate::requirements("t.req.reports").unwrap();
+        assert_eq!((tree["satisfied"].as_bool(), tree["tree"][0]["state"].as_str()), (Some(false), Some("missing")));
+        assert!(crate::unload("t.req.reports"));
+    }
+
+    #[test]
+    fn app_and_protocol_requirements_are_checked_against_this_host() {
+        add(
+            "t.req.future",
+            "1.0.0",
+            json!({"requires": {"apps": {"deckcraft": ">=99.0"}, "protocol": ">=9.0", "features": ["dialogs", "telepathy"]}}),
+        );
+        let why = messages("t.req.future");
+        assert_eq!(why.len(), 3, "{why:?}");
+        assert!(why[0].starts_with("Needs DeckCraft 99.0 or later (this is "), "{why:?}");
+        assert_eq!(why[1], "Needs plugin protocol 9.0 or later (this DeckCraft has 2.0)");
+        assert_eq!(why[2], "Needs `telepathy`, which this DeckCraft doesn't have");
+        add(
+            "t.req.today",
+            "1.0.0",
+            json!({"requires": {"apps": {"deckcraft": ">=0.1", "gridcraft": ">=99"}, "protocol": ">=1.2", "features": ["dialogs", "push"]}}),
+        );
+        assert!(crate::get("t.req.today").unwrap().active());
+        assert!(crate::unload("t.req.future") && crate::unload("t.req.today"));
+    }
+
+    #[test]
+    fn cycles_block_and_unloading_breaks_them() {
+        add("t.req.cyc-a", "1.0.0", json!({"requires": {"addins": [{"id": "t.req.cyc-b"}]}}));
+        add("t.req.cyc-b", "1.0.0", json!({"requires": {"addins": [{"id": "t.req.cyc-a"}]}}));
+        assert_eq!(messages("t.req.cyc-a"), ["Requirement cycle: cyc-a → cyc-b → cyc-a"]);
+        assert_eq!(crate::get("t.req.cyc-b").unwrap().blocked_by()[0].kind, crate::requires::Kind::Cycle);
+        assert!(crate::unload("t.req.cyc-b"));
+        assert_eq!(messages("t.req.cyc-a"), ["Needs t.req.cyc-b, which isn't installed"]);
+        assert!(crate::unload("t.req.cyc-a"));
     }
 }

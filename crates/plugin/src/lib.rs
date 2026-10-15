@@ -15,6 +15,10 @@
 //! so a co-editing transport (manifest `collab`) can send whenever it likes, and the app sends it
 //! notifications ([`Plugin::notify`]) between its requests.
 //!
+//! Manifests 1.3 add `requires` ([`requires`]): the app versions, protocol, host features and
+//! other add-ins (with version ranges, [`version`]) an add-in needs. Every loaded add-in is
+//! resolved together ([`refresh`]); one whose needs aren't met is blocked, with the reasons.
+//!
 //! A plugin runs in its own process, so a crash, a hang or a bad answer from it costs a command an
 //! error, never the presentation. Calls time out; a plugin that keeps failing is stopped.
 //! The protocol is documented in `docs/plugins.md`.
@@ -26,6 +30,8 @@ pub mod install;
 pub mod office;
 mod process;
 pub mod push;
+pub mod requires;
+pub mod version;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -39,6 +45,9 @@ pub use process::{Connection, HostError, HostHandler, Notifier, RequestError};
 
 /// The protocol version this host speaks (sent in `initialize`).
 pub const PROTOCOL_VERSION: u32 = 1;
+/// The plugin protocol this host speaks, as manifests' `requires.protocol` is checked against
+/// (`initialize`'s `host.protocol`): protocol 2 (the push channel), with manifests 1.3.
+pub const PROTOCOL: &str = "2.0";
 /// What this host does beyond protocol 1.1, sent as `initialize`'s `host.features`: host-drawn
 /// dialogs, opening files, document events and `context.document` (protocol 1.2); the push channel
 /// and co-editing (protocol 2).
@@ -118,6 +127,9 @@ pub struct Manifest {
     /// Only such a plugin may join rooms.
     #[serde(default)]
     pub collab: Option<CollabDecl>,
+    /// What the add-in needs (manifest 1.3): app versions, protocol, host features, other add-ins.
+    #[serde(default, skip_serializing_if = "requires::Requires::is_empty")]
+    pub requires: requires::Requires,
     /// An Office add-in (read from its `manifest.xml`): its task panes and permissions.
     #[serde(skip)]
     pub office: Option<office::OfficeInfo>,
@@ -364,6 +376,7 @@ impl Manifest {
         {
             return Err(format!("{MANIFEST}: `collab.transport` needs 1–64 characters and `collab.label` at most {MAX_LABEL}"));
         }
+        self.requires.validate(&self.id)?;
         if self.events.len() > 64 || self.events.iter().any(|e| e.is_empty() || e.len() > 64) {
             return Err(format!("{MANIFEST}: `events` holds at most 64 event names"));
         }
@@ -424,6 +437,10 @@ pub struct Plugin {
     pub source: Option<Json>,
     /// Sends to the running process without its lock (protocol 2's notifications).
     notifier: Mutex<Option<Notifier>>,
+    /// Why it can't run (manifest 1.3): empty unless blocked. Set by [`refresh`].
+    blocked: Mutex<Vec<requires::Blocker>>,
+    /// Stopped after failing too often (mirrors `State::Failed`, readable without the state lock).
+    failed: std::sync::atomic::AtomicBool,
 }
 
 thread_local! {
@@ -447,7 +464,65 @@ impl Plugin {
             source: install::read_source(&dir),
             dir,
             notifier: Mutex::new(None),
+            blocked: Mutex::new(Vec::new()),
+            failed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Records that the plugin failed too often (its state is `Failed`).
+    fn mark_failed(&self) {
+        self.failed.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Stopped after failing too often, until reloaded or turned off and on.
+    pub fn failed(&self) -> bool {
+        self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Why it's blocked (manifest 1.3); empty when it isn't.
+    pub fn blocked_by(&self) -> Vec<requires::Blocker> {
+        lock(&self.blocked).clone()
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        !lock(&self.blocked).is_empty()
+    }
+
+    /// Turned on and not blocked: its commands, ribbon and menu items are there.
+    pub fn active(&self) -> bool {
+        self.enabled() && !self.is_blocked()
+    }
+
+    /// Refuses a blocked plugin, naming the first reason.
+    fn check_blocked(&self) -> Result<(), String> {
+        match lock(&self.blocked).first() {
+            Some(b) => Err(format!("plugin {} is blocked: {}", self.manifest.id, b.message)),
+            None => Ok(()),
+        }
+    }
+
+    /// Starts the required add-ins that aren't running yet, before this one starts (they start
+    /// first). Nothing to do when this one is already running or busy.
+    fn start_requirements(&self) -> Result<(), String> {
+        if self.manifest.requires.addins.is_empty() || !self.enabled() {
+            return Ok(());
+        }
+        let idle = match self.state.try_lock() {
+            Ok(g) => !matches!(g.0, State::Running(_)),
+            Err(std::sync::TryLockError::Poisoned(g)) => !matches!(g.into_inner().0, State::Running(_)),
+            Err(std::sync::TryLockError::WouldBlock) => false,
+        };
+        if !idle {
+            return Ok(());
+        }
+        for r in self.manifest.requires.required() {
+            let Some(dep) = get(&r.id) else { continue };
+            if dep.manifest.office.is_some() || BUSY.with(|b| b.borrow().contains(&dep.manifest.id)) {
+                continue;
+            }
+            dep.ensure_running().map_err(|e| format!("{} needs {}, which couldn't start: {e}", self.manifest.id, dep.manifest.name))?;
+        }
+        Ok(())
     }
 
     /// [`Plugin::request`], answering the plugin's `host/…` requests with `host` meanwhile.
@@ -457,6 +532,9 @@ impl Plugin {
         if BUSY.with(|b| b.borrow().contains(&self.manifest.id)) {
             return Err(format!("plugin {} is busy", self.manifest.id));
         }
+        self.check_blocked()?;
+        self.start_requirements()?;
+        let was_failed = self.failed();
         BUSY.with(|b| b.borrow_mut().push(self.manifest.id.clone()));
         let r = self.request_inner(method, params, timeout, host);
         BUSY.with(|b| {
@@ -465,6 +543,10 @@ impl Plugin {
                 b.remove(i);
             }
         });
+        // Failing for good blocks the add-ins that need this one.
+        if self.failed() != was_failed {
+            refresh();
+        }
         r
     }
 
@@ -477,6 +559,7 @@ impl Plugin {
         if !self.enabled() {
             return Err(format!("plugin {} is turned off", self.manifest.id));
         }
+        self.check_blocked()?;
         let (state, failures) = &mut *guard;
         if let State::Failed(why) = state {
             return Err(why.clone());
@@ -489,6 +572,9 @@ impl Plugin {
                 }
                 Err(e) => {
                     *state = if *failures >= MAX_FAILURES { State::Failed(format!("stopped after {failures} failures: {e}")) } else { State::Idle };
+                    if *failures >= MAX_FAILURES {
+                        self.mark_failed();
+                    }
                     return Err(e);
                 }
             }
@@ -502,6 +588,9 @@ impl Plugin {
                 log::warn!("plugin {}: {} (failure {failures} of {MAX_FAILURES})", self.manifest.id, e.message);
                 *state =
                     if *failures >= MAX_FAILURES { State::Failed(format!("stopped after {failures} failures: {}", e.message)) } else { State::Idle };
+                if *failures >= MAX_FAILURES {
+                    self.mark_failed();
+                }
                 *lock(&self.notifier) = None;
                 Err(e.message)
             }
@@ -512,7 +601,11 @@ impl Plugin {
     /// Starts the process and sends `initialize`. A failure counts.
     fn start(&self, failures: &mut u32) -> Result<Connection, String> {
         let mut conn = Connection::start(&self.manifest, &self.dir)?;
-        let init = initialize_params(&self.manifest.id, &self.dir);
+        let mut init = initialize_params(&self.manifest.id, &self.dir);
+        // Manifest 1.3: every installed add-in, so this one can adapt to optional ones.
+        init["addins"] = Json::Array(
+            list().iter().map(|p| json!({"id": p.manifest.id, "version": p.manifest.version, "enabled": p.active() && !p.failed()})).collect(),
+        );
         if let Err(e) = conn.request("initialize", init, INIT_TIMEOUT) {
             *failures += 1;
             return Err(e.message);
@@ -526,6 +619,17 @@ impl Plugin {
         if self.manifest.office.is_some() {
             return Err(format!("{} is an Office add-in: it runs in its task pane", self.manifest.id));
         }
+        self.check_blocked()?;
+        self.start_requirements()?;
+        let was_failed = self.failed();
+        let r = self.ensure_running_inner();
+        if self.failed() != was_failed {
+            refresh();
+        }
+        r
+    }
+
+    fn ensure_running_inner(&self) -> Result<(), String> {
         let mut guard = lock(&self.state);
         if !self.enabled() {
             return Err(format!("plugin {} is turned off", self.manifest.id));
@@ -543,6 +647,7 @@ impl Plugin {
                 Err(e) => {
                     if *failures >= MAX_FAILURES {
                         *state = State::Failed(format!("stopped after {failures} failures: {e}"));
+                        self.mark_failed();
                     }
                     Err(e)
                 }
@@ -569,11 +674,20 @@ impl Plugin {
     /// Records a failure that happened outside a request (the process exited, a message was too
     /// long). The next use starts it again, until it failed too often.
     pub fn count_failure(&self, why: &str) {
+        let was_failed = self.failed();
+        self.count_failure_inner(why);
+        if self.failed() != was_failed {
+            refresh();
+        }
+    }
+
+    fn count_failure_inner(&self, why: &str) {
         let mut guard = lock(&self.state);
         let (state, failures) = &mut *guard;
         *failures += 1;
         log::warn!("plugin {}: {why} (failure {failures} of {MAX_FAILURES})", self.manifest.id);
         if *failures >= MAX_FAILURES {
+            self.mark_failed();
             if let State::Running(conn) = std::mem::replace(state, State::Failed(format!("stopped after {failures} failures: {why}"))) {
                 conn.shutdown();
             }
@@ -583,11 +697,19 @@ impl Plugin {
 
     /// Stops the plugin and marks it failed (it flooded the app).
     pub fn fail(&self, why: &str) {
-        let mut guard = lock(&self.state);
-        if let State::Running(conn) = std::mem::replace(&mut guard.0, State::Failed(why.to_string())) {
-            conn.shutdown();
+        let was_failed = self.failed();
+        {
+            let mut guard = lock(&self.state);
+            if let State::Running(conn) = std::mem::replace(&mut guard.0, State::Failed(why.to_string())) {
+                conn.shutdown();
+            }
+            self.mark_failed();
+            *lock(&self.notifier) = None;
         }
-        *lock(&self.notifier) = None;
+        log::warn!("plugin {}: {why}", self.manifest.id);
+        if !was_failed {
+            refresh();
+        }
     }
 
     /// The process exited on its own: it's started again on next use.
@@ -619,6 +741,9 @@ impl Plugin {
         if !self.enabled() {
             return "off".into();
         }
+        if let Some(b) = lock(&self.blocked).first() {
+            return format!("blocked: {}", b.message);
+        }
         match &lock(&self.state).0 {
             State::Idle => "ready".into(),
             State::Running(_) => "running".into(),
@@ -626,10 +751,33 @@ impl Plugin {
         }
     }
 
+    /// `disabled` (turned off), `blocked` (manifest 1.3), `failed`, `running` or `loaded` (not
+    /// started yet).
+    pub fn state(&self) -> &'static str {
+        if !self.enabled() {
+            "disabled"
+        } else if self.is_blocked() {
+            "blocked"
+        } else if self.failed() {
+            "failed"
+        } else {
+            match self.state.try_lock() {
+                Ok(g) if !matches!(g.0, State::Running(_)) => "loaded",
+                Err(std::sync::TryLockError::Poisoned(g)) if !matches!(g.get_ref().0, State::Running(_)) => "loaded",
+                // Busy in a request: running.
+                _ => "running",
+            }
+        }
+    }
+
     /// The plugin as `plugins.list` reports it.
     pub fn info(&self) -> Json {
         let m = &self.manifest;
         json!({
+            "state": self.state(),
+            "blockedBy": self.blocked_by(),
+            "requires": m.requires,
+            "requiredBy": required_by(&m.id),
             "id": m.id,
             "name": m.name,
             "version": m.version,
@@ -650,7 +798,7 @@ impl Plugin {
             "kind": if m.office.is_some() { "office" } else { "native" },
             "office": m.office.as_ref().map(|o| json!({
                 "id": o.office_id, "permissions": o.permissions, "sourceLocation": o.source_location,
-                "requirements": o.requirements, "iconUrl": o.icon_url,
+                "requirements": o.requirements, "methods": o.methods, "iconUrl": o.icon_url,
             })),
         })
     }
@@ -664,13 +812,14 @@ impl Plugin {
     }
 }
 
-/// `initialize`'s params: the protocol version, the host (with its `features`, UI `language`
-/// and, for protocol 2, what co-editing it speaks) and the plugin.
+/// `initialize`'s params: the protocol version, the host (with its `protocol`, `features`, UI
+/// `language` and, for protocol 2, what co-editing it speaks) and the plugin. Starting a plugin
+/// adds `addins` (manifest 1.3).
 pub fn initialize_params(plugin_id: &str, dir: &Path) -> Json {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "host": {
-            "id": HOST_ID, "name": "DeckCraft", "version": env!("CARGO_PKG_VERSION"),
+            "id": HOST_ID, "name": "DeckCraft", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL,
             "features": HOST_FEATURES, "language": host_language(),
             "collab": {"formats": [COLLAB_FORMAT], "app": HOST_ID, "schema": COLLAB_SCHEMA, "encryption": ["aes-256-gcm"]},
         },
@@ -718,6 +867,13 @@ pub fn list() -> Vec<Arc<Plugin>> {
 /// Loads the plugin in `path` (a folder holding `plugin.json`, or the manifest itself). A plugin
 /// with the same id is unloaded first. The process starts on first use.
 pub fn load(path: &Path) -> Result<Arc<Plugin>, String> {
+    let (manifest, dir) = read_manifest(path)?;
+    install(manifest, dir)
+}
+
+/// Reads the manifest in `path` (a folder holding `plugin.json` or `manifest.xml`, or the
+/// manifest itself) without loading it. Returns it and the plugin's folder.
+pub fn read_manifest(path: &Path) -> Result<(Manifest, PathBuf), String> {
     let (dir, file) = if path.is_dir() {
         // An Office add-in's folder holds `manifest.xml` instead of `plugin.json`.
         let office = path.join(office::MANIFEST_FILE);
@@ -734,18 +890,176 @@ pub fn load(path: &Path) -> Result<Arc<Plugin>, String> {
     let is_office = file.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml"));
     let manifest = if is_office { office::parse_manifest(&text, HOST_ID)? } else { Manifest::parse(&text)? };
     let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-    install(manifest, dir)
+    Ok((manifest, dir))
 }
 
 /// Installs a parsed manifest (tests and [`load`]).
 pub fn install(manifest: Manifest, dir: PathBuf) -> Result<Arc<Plugin>, String> {
     if get(&manifest.id).is_some() {
-        unload(&manifest.id);
+        remove(&manifest.id);
     }
     let plugin = Arc::new(Plugin::new(manifest, dir));
     lock(loaded()).push(plugin.clone());
     log::info!("plugin {} {} loaded from {}", plugin.manifest.id, plugin.manifest.version, plugin.dir.display());
+    // Its requirements, and those of the add-ins that need it, are resolved again.
+    refresh();
     Ok(plugin)
+}
+
+// ---------------------------------------------------------------- requirements (manifest 1.3)
+
+fn resolution() -> &'static Mutex<requires::Resolution> {
+    static RESOLUTION: OnceLock<Mutex<requires::Resolution>> = OnceLock::new();
+    RESOLUTION.get_or_init(|| Mutex::new(requires::Resolution::default()))
+}
+
+/// This app as requirements see it: its version, protocol, features and the Office.js API sets.
+pub fn host_info() -> requires::HostInfo {
+    requires::HostInfo {
+        id: HOST_ID.into(),
+        name: "DeckCraft".into(),
+        version: version::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(version::Version::new(0, 0, 0)),
+        protocol: version::Version::parse(PROTOCOL).unwrap_or(version::Version::new(1, 0, 0)),
+        features: HOST_FEATURES.iter().map(|f| f.to_string()).collect(),
+        api_sets: office::API_SETS.iter().map(|(n, (major, minor))| (n.to_string(), version::Version::new(*major, *minor, 0))).collect(),
+        methods: office::API_METHODS.iter().map(|m| m.to_string()).collect(),
+    }
+}
+
+/// The loaded plugins as [`requires::resolve`] sees them.
+pub fn nodes() -> Vec<requires::Node> {
+    list().iter().map(|p| node_of(p)).collect()
+}
+
+fn node_of(p: &Plugin) -> requires::Node {
+    requires::Node {
+        id: p.manifest.id.clone(),
+        name: p.manifest.name.clone(),
+        version: p.manifest.version.clone(),
+        enabled: p.enabled(),
+        failed: p.failed(),
+        requires: p.manifest.requires.clone(),
+        office: p.manifest.office.as_ref().map(|o| requires::OfficeNeeds { sets: o.requirements.clone(), methods: o.methods.clone() }),
+    }
+}
+
+/// Resolves every loaded plugin's requirements together and applies the outcome: blocked
+/// plugins lose their commands, ribbon and menu items (and their process stops), unblocked ones
+/// get them back. Runs whenever plugins arrive, leave or turn on or off, and when one fails for
+/// good.
+pub fn refresh() -> requires::Resolution {
+    // One resolution at a time, from snapshot to applying it: two threads refreshing at once would
+    // otherwise let the older snapshot win.
+    static REFRESHING: Mutex<()> = Mutex::new(());
+    let _one = lock(&REFRESHING);
+    let plugins = list();
+    let nodes: Vec<requires::Node> = plugins.iter().map(|p| node_of(p)).collect();
+    let r = requires::resolve(&nodes, &host_info());
+    for p in &plugins {
+        let now = r.blocked.get(&p.manifest.id).cloned().unwrap_or_default();
+        let was_blocked = {
+            let mut b = lock(&p.blocked);
+            let was = !b.is_empty();
+            *b = now;
+            was
+        };
+        let blocked = p.is_blocked();
+        if blocked && !was_blocked {
+            log::info!("plugin {} is blocked: {}", p.manifest.id, p.blocked_by().first().map(|b| b.message.as_str()).unwrap_or(""));
+        }
+        if blocked {
+            // Not while it's answering (this may run from inside one of its requests).
+            if let Ok(mut guard) = p.state.try_lock() {
+                *lock(&p.notifier) = None;
+                if let State::Running(conn) = std::mem::replace(&mut guard.0, State::Idle) {
+                    conn.shutdown();
+                }
+            }
+        }
+    }
+    *lock(resolution()) = r.clone();
+    r
+}
+
+/// The loaded plugins that require `id` (not optionally).
+pub fn required_by(id: &str) -> Vec<String> {
+    lock(resolution()).required_by.get(id).cloned().unwrap_or_default()
+}
+
+/// The plugins in start order: required ones before those that need them.
+pub fn start_order() -> Vec<String> {
+    lock(resolution()).order.clone()
+}
+
+/// The turned-on plugins that need `id`, directly or through others (what turning it off or
+/// removing it would block), in start order.
+pub fn dependents(id: &str) -> Vec<String> {
+    let r = lock(resolution()).clone();
+    let mut out: Vec<String> = Vec::new();
+    let mut todo = vec![id.to_string()];
+    while let Some(x) = todo.pop() {
+        for u in r.required_by.get(&x).into_iter().flatten() {
+            if u != id && !out.contains(u) && get(u).is_some_and(|p| p.enabled()) {
+                out.push(u.clone());
+                todo.push(u.clone());
+            }
+        }
+        if out.len() > 10_000 {
+            break;
+        }
+    }
+    out.sort_by_key(|x| r.order.iter().position(|o| o == x));
+    out
+}
+
+/// Installing `manifest` would put it out of range for these turned-on plugins that require it.
+pub fn conflicts(manifest: &Manifest) -> Vec<requires::Conflict> {
+    requires::conflicts(&nodes(), &manifest.id, &manifest.name, &manifest.version)
+}
+
+/// `id`'s requirements that are missing or out of range (optional ones too).
+pub fn missing(id: &str) -> Vec<requires::Missing> {
+    let all = nodes();
+    all.iter().find(|n| n.id == id).map(|n| requires::missing(n, &all)).unwrap_or_default()
+}
+
+/// `plugins.requirements`: whether `id`'s requirements are met, and the tree of the add-ins it
+/// needs (`{id, need, have, state, optional, children}`, `state` `missing` for one that isn't
+/// installed). Bounded by [`requires::MAX_DEPTH`] and cycles.
+pub fn requirements(id: &str) -> Result<Json, String> {
+    let p = get(id).ok_or_else(|| format!("no plugin `{id}` is loaded"))?;
+    fn tree(p: &Plugin, seen: &mut Vec<String>, depth: usize) -> Vec<Json> {
+        p.manifest
+            .requires
+            .addins
+            .iter()
+            .map(|r| {
+                let dep = get(&r.id);
+                let mut node = json!({
+                    "id": r.id, "name": dep.as_ref().map(|d| d.manifest.name.clone()).unwrap_or_else(|| r.label()),
+                    "need": r.need(), "have": dep.as_ref().map(|d| d.manifest.version.clone()),
+                    "state": dep.as_ref().map_or("missing", |d| d.state()), "optional": r.optional, "why": r.why,
+                    "github": r.github, "children": [],
+                });
+                if let Some(d) = dep
+                    && depth < requires::MAX_DEPTH
+                    && !seen.contains(&r.id)
+                {
+                    seen.push(r.id.clone());
+                    node["children"] = Json::Array(tree(&d, seen, depth + 1));
+                    seen.pop();
+                }
+                node
+            })
+            .collect()
+    }
+    let mut seen = vec![id.to_string()];
+    Ok(json!({
+        "id": id,
+        "satisfied": !p.is_blocked(),
+        "blockedBy": p.blocked_by(),
+        "tree": tree(&p, &mut seen, 0),
+    }))
 }
 
 /// Turns a loaded plugin off or back on. Off, it stays listed but its commands are refused and its
@@ -758,17 +1072,30 @@ pub fn set_enabled(id: &str, on: bool) -> Result<bool, String> {
     if on {
         // A plugin that failed too often gets a fresh start.
         *lock(&plugin.state) = (State::Idle, 0);
+        plugin.failed.store(false, std::sync::atomic::Ordering::Relaxed);
         plugin.enabled.store(true, std::sync::atomic::Ordering::Relaxed);
     } else {
         plugin.enabled.store(false, std::sync::atomic::Ordering::Relaxed);
         plugin.stop();
     }
     log::info!("plugin {id} turned {}", if on { "on" } else { "off" });
+    // Blocks or unblocks the plugins that need it.
+    refresh();
     Ok(true)
 }
 
 /// Unloads a plugin: its commands disappear and its process is asked to exit. True when it was loaded.
 pub fn unload(id: &str) -> bool {
+    let removed = remove(id);
+    if removed {
+        // The plugins that needed it are blocked now.
+        refresh();
+    }
+    removed
+}
+
+/// Takes a plugin out of the list and stops it (no resolution).
+fn remove(id: &str) -> bool {
     let plugin = {
         let mut all = lock(loaded());
         let Some(i) = all.iter().position(|p| p.manifest.id == id) else { return false };
@@ -847,6 +1174,7 @@ pub fn run_command_with(plugin_id: &str, command: &str, params: Json, context: J
     if !plugin.enabled() {
         return Err(format!("plugin {plugin_id} is turned off (File › Options › Add-ins)"));
     }
+    plugin.check_blocked()?;
     if !plugin.manifest.commands.iter().any(|c| c.id == command) {
         return Err(format!("plugin {plugin_id} has no command `{command}`"));
     }
@@ -865,22 +1193,23 @@ pub fn call_macros(plugin_id: &str, method: &str, params: Json, host: &mut HostH
     if !plugin.enabled() {
         return Err(format!("plugin {plugin_id} is turned off (File › Options › Add-ins)"));
     }
+    plugin.check_blocked()?;
     if plugin.manifest.macros.is_none() || !method.starts_with("macros/") {
         return Err(format!("plugin {plugin_id} doesn't run macros"));
     }
     plugin.request_with(method, params, COMMAND_TIMEOUT, host)
 }
 
-/// The enabled co-editing transports (protocol 2), in load order.
+/// The active (on, not blocked) co-editing transports (protocol 2), in load order.
 pub fn transports() -> Vec<Arc<Plugin>> {
-    list().into_iter().filter(|p| p.enabled() && p.is_transport()).collect()
+    list().into_iter().filter(|p| p.active() && p.is_transport()).collect()
 }
 
-/// The enabled plugins that run macros, with their language.
+/// The active plugins that run macros, with their language.
 pub fn macro_plugins() -> Vec<(String, String)> {
     list()
         .into_iter()
-        .filter(|p| p.enabled())
+        .filter(|p| p.active())
         .filter_map(|p| p.manifest.macros.as_ref().map(|m| (p.manifest.id.clone(), m.language.clone())))
         .collect()
 }
@@ -918,9 +1247,9 @@ fn parse_reply(r: Json) -> Result<CommandReply, String> {
 
 // ---------------------------------------------------------------- document events
 
-/// The loaded, enabled plugins that declared `event` (protocol 1.2), in load order.
+/// The loaded, active (on, not blocked) plugins that declared `event` (protocol 1.2), in load order.
 pub fn listeners(event: &str) -> Vec<String> {
-    list().into_iter().filter(|p| p.enabled() && p.hears(event)).map(|p| p.manifest.id.clone()).collect()
+    list().into_iter().filter(|p| p.active() && p.hears(event)).map(|p| p.manifest.id.clone()).collect()
 }
 
 /// Sends `events/<event>` to one plugin, answering its `host/…` requests with `host` meanwhile:
@@ -929,7 +1258,7 @@ pub fn listeners(event: &str) -> Vec<String> {
 /// for a command.
 pub fn send_event(plugin_id: &str, event: &str, params: Json, host: &mut HostHandler<'_>) -> Result<Option<String>, String> {
     let plugin = get(plugin_id).ok_or_else(|| format!("no plugin `{plugin_id}` is loaded"))?;
-    if !plugin.enabled() || !plugin.hears(event) {
+    if !plugin.active() || !plugin.hears(event) {
         return Err(format!("plugin {plugin_id} doesn't hear {event}"));
     }
     let timeout = if event == "documentClosed" { CLOSE_EVENT_TIMEOUT } else { EVENT_TIMEOUT };
