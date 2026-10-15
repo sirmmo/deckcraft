@@ -15,7 +15,7 @@ fn main() {
         serve();
         return;
     }
-    let tests: [(&str, fn()); 12] = [
+    let tests: [(&str, fn()); 13] = [
         ("commands_answer_engine_commands_as_one_step", commands_answer_engine_commands_as_one_step),
         ("macros_drive_the_presentation_as_one_undo_step", macros_drive_the_presentation_as_one_undo_step),
         ("a_failing_macro_changes_nothing", a_failing_macro_changes_nothing),
@@ -25,6 +25,7 @@ fn main() {
         ("recording_sends_the_steps_and_keeps_the_code", recording_sends_the_steps_and_keeps_the_code),
         ("commands_and_macros_see_the_document", commands_and_macros_see_the_document),
         ("programmatic_runs_return_open_and_dialog", programmatic_runs_return_open_and_dialog),
+        ("dialog_steps_that_change_nothing_are_no_edit", dialog_steps_that_change_nothing_are_no_edit),
         ("declared_events_follow_opens_saves_and_closes", declared_events_follow_opens_saves_and_closes),
         ("events_never_hold_up_or_fail_a_save", events_never_hold_up_or_fail_a_save),
         ("events_cant_change_the_presentation", events_cant_change_the_presentation),
@@ -88,6 +89,12 @@ fn serve() {
                     "command": "browse", "params": {"account": "me"}, "okLabel": "Open"
                 }}}),
             },
+            // A dialog step that reads the presentation and changes nothing.
+            Some("commands/run") if p["command"] == "peek" => {
+                let r = host(&mut out, &mut lines, "host/sync", json!({"actions": [{"op": "load", "path": slides, "props": ["count"]}]}));
+                let n = r["result"]["results"][0]["count"].as_u64().unwrap_or(0);
+                json!({"result": {"dialog": {"kind": "message", "prompt": format!("{n} slides"), "buttons": [{"label": "Again", "command": "peek"}]}}})
+            }
             Some("commands/run") if p["command"] == "stray" => {
                 json!({"result": {"dialog": {"kind": "message", "prompt": "hi", "buttons": [{"label": "Elsewhere", "command": "notMine"}]}}})
             }
@@ -117,18 +124,19 @@ fn serve() {
                 if name.contains("fail") {
                     json!({"error": {"code": 1, "message": "upload failed"}})
                 } else if m == "events/documentOpened" {
-                    // Reading works; changing is refused during an event.
+                    // Nothing of the presentation can be read or changed during an event.
                     let r = host(&mut out, &mut lines, "host/sync", json!({"actions": [{"op": "load", "path": slides, "props": ["count"]}]}));
-                    let n = r["result"]["results"][0]["count"].as_u64().unwrap_or(0);
                     let w = host(
                         &mut out,
                         &mut lines,
                         "host/sync",
                         json!({"actions": [{"op": "call", "path": first_shapes, "method": "addTextBox", "args": ["x", {"left": 1, "top": 1, "width": 9, "height": 9}]}]}),
                     );
+                    let g = host(&mut out, &mut lines, "host/vbaProject/get", json!({}));
                     let v = host(&mut out, &mut lines, "host/vbaProject/set", json!({"base64": ""}));
                     host(&mut out, &mut lines, "host/message", json!({"text": "noted"}));
-                    json!({"result": {"message": format!("opened {name}: {n} slides; write {} {}", w["error"]["data"]["code"].as_str().unwrap_or("allowed"), v["error"]["data"]["code"].as_str().unwrap_or("allowed"))}})
+                    let code = |x: &Json| x["error"]["data"]["code"].as_str().unwrap_or("allowed").to_string();
+                    json!({"result": {"message": format!("opened {name}: read {} write {} vba {} {}", code(&r), code(&w), code(&g), code(&v))}})
                 } else {
                     json!({"result": {"message": format!("{} {name} {}", &m[7..], p["format"].as_str().unwrap_or("-"))}})
                 }
@@ -211,7 +219,7 @@ fn load(s: &mut Session, id: &str, events: Json) {
     std::fs::create_dir_all(&dir).unwrap();
     let exe = std::env::current_exe().unwrap();
     let commands: Vec<Json> =
-        ["title", "broken", "ctx", "opener", "browse", "stray", "malformed", "combo"].iter().map(|c| json!({"id": c, "label": c})).collect();
+        ["title", "broken", "ctx", "opener", "browse", "stray", "malformed", "combo", "peek"].iter().map(|c| json!({"id": c, "label": c})).collect();
     let manifest = json!({
         "id": id, "name": "Test add-in", "macros": {"language": "TestBasic"}, "run": {"command": exe, "args": ["--serve"]},
         "commands": commands, "events": events
@@ -471,6 +479,26 @@ fn programmatic_runs_return_open_and_dialog() {
     assert!(deckcraft_engine::plugin::unload(PLUGIN));
 }
 
+/// A command whose answer changes nothing (a dialog step, even one that read the presentation)
+/// makes no undo step and leaves the presentation clean: opening a file at the end of a dialog
+/// chain mustn't ask to save first.
+fn dialog_steps_that_change_nothing_are_no_edit() {
+    let mut s = session();
+    let undo = s.active().unwrap().history.undo.len();
+    for cmd in ["browse", "peek", "peek"] {
+        let r = s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": cmd})).unwrap();
+        assert!(r["dialog"].is_object(), "{r}");
+        let st = s.active().unwrap();
+        assert!(!st.is_dirty(), "{cmd} made the presentation dirty");
+        assert_eq!(st.history.undo.len(), undo, "{cmd} made an undo step");
+    }
+    // A step that does change it is still one undo step.
+    s.execute("plugins.run", &json!({"plugin": PLUGIN, "command": "title"})).unwrap();
+    assert!(s.active().unwrap().is_dirty());
+    assert_eq!(s.active().unwrap().history.undo.len(), undo + 1);
+    assert!(deckcraft_engine::plugin::unload(PLUGIN));
+}
+
 fn declared_events_follow_opens_saves_and_closes() {
     let mut s = session();
     // An add-in that declares no events hears none.
@@ -547,9 +575,9 @@ fn events_cant_change_the_presentation() {
     s.execute("file.close", &json!({})).unwrap();
     heard(&mut s);
     s.execute("file.open", &json!({"path": path})).unwrap();
-    let (n, undo) = (slides(&s), s.active().unwrap().history.undo.len());
+    let undo = s.active().unwrap().history.undo.len();
     let said = heard(&mut s);
-    assert_eq!(said, [format!("{PLUGIN}: opened Look.pptx: {n} slides; write AccessDenied AccessDenied [noted]")]);
+    assert_eq!(said, [format!("{PLUGIN}: opened Look.pptx: read AccessDenied write AccessDenied vba AccessDenied AccessDenied [noted]")]);
     let st = s.active().unwrap();
     assert!(!st.is_dirty() && st.history.undo.len() == undo, "an event is no edit and no undo step");
     assert_eq!(st.doc.slides[0].shapes.len(), deckcraft_pptx::import(&std::fs::read(&path).unwrap()).unwrap().slides[0].shapes.len());

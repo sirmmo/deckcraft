@@ -9,14 +9,13 @@
 //! (`file.recovery.save`) sends none. The host collects what the add-ins answered;
 //! [`Session::take_event_outcomes`] hands it to the UI, which shows it in the status bar.
 //!
-//! During an event an add-in may use `host/log` and `host/message`, and read the presentation
-//! through `host/sync` (as it was when the event happened), but whatever would change it is refused
-//! with `AccessDenied`: events are notifications, not edits.
+//! During an event an add-in may use `host/log` and `host/message`; `host/sync` and
+//! `host/vbaProject/*` are refused with `AccessDenied` (reads too): events are notifications, not
+//! edits, as in GridCraft and WordCraft.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use deckcraft_model::Presentation;
 use deckcraft_plugin::HostError;
 use serde_json::{Value as Json, json};
 
@@ -47,8 +46,6 @@ pub struct EventOutcome {
 struct Job {
     event: &'static str,
     params: Json,
-    /// The presentation when the event happened, for `host/sync` reads.
-    doc: Arc<Presentation>,
     listeners: Vec<String>,
 }
 
@@ -91,7 +88,7 @@ impl Drop for Delivered {
 impl Session {
     /// Queues `event` about the file at `path` for the add-ins that hear it (nothing when none
     /// does). `format` is `documentSaved`'s. Sent once the outermost command has finished.
-    pub(crate) fn queue_event(&mut self, event: &'static str, path: &str, format: Option<&str>, doc: Arc<Presentation>) {
+    pub(crate) fn queue_event(&mut self, event: &'static str, path: &str, format: Option<&str>) {
         let listeners = deckcraft_plugin::listeners(event);
         if listeners.is_empty() {
             return;
@@ -104,7 +101,7 @@ impl Session {
         if let Some(f) = format {
             params["format"] = json!(f);
         }
-        self.events.queued.push(Job { event, params, doc, listeners });
+        self.events.queued.push(Job { event, params, listeners });
     }
 
     /// Hands the queued events to the delivery thread (after the outermost command).
@@ -186,9 +183,9 @@ impl Session {
     /// wait longer). Returns whether everything was delivered.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn quit_events(&mut self) -> bool {
-        let open: Vec<(String, Arc<Presentation>)> = self.docs.iter().filter_map(|d| Some((d.path.clone()?, d.doc.clone()))).collect();
-        for (path, doc) in open {
-            self.queue_event(DOCUMENT_CLOSED, &path, None, doc);
+        let open: Vec<String> = self.docs.iter().filter_map(|d| d.path.clone()).collect();
+        for path in open {
+            self.queue_event(DOCUMENT_CLOSED, &path, None);
         }
         self.wait_events(deckcraft_plugin::CLOSE_EVENT_TIMEOUT)
     }
@@ -199,10 +196,7 @@ fn deliver(job: &Job) -> Vec<EventOutcome> {
     let mut out = Vec::with_capacity(job.listeners.len());
     for id in &job.listeners {
         let mut notes = Vec::new();
-        let mut scratch: Option<Session> = None;
-        let result = deckcraft_plugin::send_event(id, job.event, job.params.clone(), &mut |m, p| {
-            event_host_call(&job.doc, &mut scratch, id, m, p, &mut notes)
-        });
+        let result = deckcraft_plugin::send_event(id, job.event, job.params.clone(), &mut |m, p| event_host_call(job.event, id, m, p, &mut notes));
         if let Err(e) = &result {
             log::warn!("add-in {id}: events/{}: {e}", job.event);
         }
@@ -211,26 +205,10 @@ fn deliver(job: &Job) -> Vec<EventOutcome> {
     out
 }
 
-fn access_denied() -> HostError {
-    HostError {
-        code: -32000,
-        message: "an add-in can't change the presentation during a document event".into(),
-        data: json!({"code": "AccessDenied"}),
-    }
-}
-
-/// The `host/*` requests an add-in may make during an event: log and message; `host/sync` reads
-/// the presentation as it was when the event happened (in a scratch session) and is refused
-/// anything that would change it; the VBA project can be read, not replaced.
-fn event_host_call(
-    doc: &Arc<Presentation>,
-    scratch: &mut Option<Session>,
-    plugin: &str,
-    method: &str,
-    params: &Json,
-    notes: &mut Vec<String>,
-) -> std::result::Result<Json, HostError> {
-    let fail = |message: String| HostError { code: -32000, message, data: Json::Null };
+/// The `host/*` requests an add-in may make during an event: log and message. `host/sync` and the
+/// VBA project are refused, reads included (`AccessDenied`): an event is a notification, and the
+/// presentation may have changed since it happened.
+fn event_host_call(event: &str, plugin: &str, method: &str, params: &Json, notes: &mut Vec<String>) -> std::result::Result<Json, HostError> {
     match method {
         "host/log" => {
             let text: String = params.get("text").and_then(Json::as_str).unwrap_or("").chars().take(4000).collect();
@@ -244,29 +222,11 @@ fn event_host_call(
             }
             Ok(json!({"result": 1}))
         }
-        "host/sync" => {
-            let actions: Vec<deckcraft_plugin::office::Action> =
-                serde_json::from_value(params.get("actions").cloned().unwrap_or(Json::Array(Vec::new())))
-                    .map_err(|e| fail(format!("`actions`: {e}")))?;
-            if actions.len() > deckcraft_plugin::office::MAX_ACTIONS {
-                return Err(fail("too many actions".into()));
-            }
-            let s = scratch.get_or_insert_with(|| {
-                let mut s = Session::new();
-                s.add_document(crate::DocState::new((**doc).clone(), None, "Presentation".into()));
-                s
-            });
-            match crate::cmd::office::run_actions(s, plugin, deckcraft_plugin::office::Permission::ReadDocument, &actions) {
-                Ok(results) => Ok(json!({"results": results})),
-                Err(error) if error.get("code").and_then(Json::as_str) == Some("AccessDenied") => Err(HostError { data: error, ..access_denied() }),
-                Err(error) => {
-                    let message = error.get("message").and_then(Json::as_str).unwrap_or("failed").to_string();
-                    Err(HostError { code: -32000, message, data: error })
-                }
-            }
-        }
-        "host/vbaProject/get" => Ok(json!({"base64": doc.vba_project.as_ref().map(|b| crate::cmd::base64_encode(b))})),
-        "host/vbaProject/set" => Err(access_denied()),
+        "host/sync" | "host/vbaProject/get" | "host/vbaProject/set" => Err(HostError {
+            code: -32000,
+            message: format!("events/{event} is a notification: the presentation can't be read or changed during it"),
+            data: json!({"code": "AccessDenied"}),
+        }),
         _ => Err(HostError::unknown()),
     }
 }

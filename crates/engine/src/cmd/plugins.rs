@@ -187,6 +187,20 @@ pub(crate) fn snapshot(s: &Session) -> Option<(u64, Arc<deckcraft_model::Present
     s.active().map(|d| (d.uid, d.doc.clone(), d.selection.clone()))
 }
 
+/// A step that changed nothing (a dialog step that only read the presentation, or wrote back
+/// what was there) keeps the presentation it started with: no undo step, and a clean
+/// presentation stays clean, so opening a file at the end of a dialog chain doesn't ask to save.
+pub(crate) fn keep_if_unchanged(s: &mut Session, before: &Option<(u64, Arc<deckcraft_model::Presentation>, crate::Selection)>) {
+    let Some((uid, doc, _)) = before else { return };
+    if let Some(d) = s.active_mut().filter(|d| d.uid == *uid)
+        && !Arc::ptr_eq(doc, &d.doc)
+        && **doc == *d.doc
+    {
+        d.doc = doc.clone();
+        d.revision += 1;
+    }
+}
+
 /// Puts back what [`snapshot`] took (a failed step changes nothing).
 pub(crate) fn restore(s: &mut Session, snap: Option<(u64, Arc<deckcraft_model::Presentation>, crate::Selection)>) {
     let Some((uid, doc, sel)) = snap else { return };
@@ -246,6 +260,7 @@ fn run(s: &mut Session, p: &Json) -> Result<Json> {
         restore(s, before);
         return Err(bad(ID, format!("{plugin} › {command} failed, nothing was changed: {why}")));
     }
+    keep_if_unchanged(s, &before);
     if let Some(m) = &reply.message {
         s.ui_requests.push(UiRequest::Message { text: m.clone() });
     }

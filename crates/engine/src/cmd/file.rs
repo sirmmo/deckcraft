@@ -229,9 +229,8 @@ fn adopt_loaded(s: &mut Session, f: LoadedFile, p: &Value) -> Result<Value> {
         let label = str_param(p, "label").map(|l| l.chars().take(200).collect::<String>()).filter(|l| !l.trim().is_empty());
         let st = s.doc_mut()?;
         st.location_label = label;
-        let doc = st.doc.clone();
         // Add-ins that asked hear that a document was opened from a local file (protocol 1.2).
-        s.queue_event(crate::events::DOCUMENT_OPENED, &path, None, doc);
+        s.queue_event(crate::events::DOCUMENT_OPENED, &path, None);
     }
     let st = s.doc()?;
     Ok(json!({"document": i, "slides": st.doc.slides.len(), "missingFonts": st.missing_fonts, "damagedMedia": damaged}))
@@ -516,8 +515,7 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
     mark_saved(s, Some(path.clone()))?;
     // Add-ins that asked hear about the save (protocol 1.2); autosave isn't a save.
     let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    let doc = s.doc()?.doc.clone();
-    s.queue_event(crate::events::DOCUMENT_SAVED, &path, Some(&ext), doc);
+    s.queue_event(crate::events::DOCUMENT_SAVED, &path, Some(&ext));
     let renamed_from = (path != asked).then_some(asked);
     Ok(json!({"path": path, "bytes": bytes.len(), "renamedFrom": renamed_from}))
 }
@@ -691,8 +689,8 @@ fn info(s: &mut Session, _p: &Value) -> Result<Value> {
 
 fn close(s: &mut Session, _p: &Value) -> Result<Value> {
     if let Some(i) = s.active_index() {
-        if let Some((path, doc)) = s.active().and_then(|d| Some((d.path.clone()?, d.doc.clone()))) {
-            s.queue_event(crate::events::DOCUMENT_CLOSED, &path, None, doc);
+        if let Some(path) = s.active().and_then(|d| d.path.clone()) {
+            s.queue_event(crate::events::DOCUMENT_CLOSED, &path, None);
         }
         s.close_document(i);
     }

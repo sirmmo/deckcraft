@@ -1,6 +1,6 @@
 # Add-ins, Office add-ins and macros
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** patch (events refuse `host/sync` and the VBA project, reads too; no-op commands are no edit; previously minor: protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 DeckCraft runs three kinds of extension, all as **add-ins** listed in the Add-ins window (Insert ›
 Add-ins, Developer › Add-ins):
@@ -105,10 +105,12 @@ What the add-in changes this way is part of the running command's one undo step.
   failing add-in never holds up or fails the save, open or close, and an event is no undo step.
   Opened and saved time out after 30 s, closed after 5 s; quitting waits at most 5 s. The answer's
   `message` shows in the status bar, an error as a notice. During an event `host/log` and
-  `host/message` work, `host/sync` reads the presentation as it was when the event happened and
-  is refused anything that changes it (`AccessDenied`), `host/vbaProject/get` reads and
-  `host/vbaProject/set` is refused (`AccessDenied`). `deckcraft-cli run` waits for events before it
-  exits.
+  `host/message` work; `host/sync` and `host/vbaProject/get` and `/set` are refused, reads too
+  (`AccessDenied`), as in GridCraft and WordCraft: an event is a notification, not an edit.
+  `deckcraft-cli run` waits for events before it exits.
+- A command whose answer changes nothing (a dialog step, even one that read the presentation
+  through `host/sync` or wrote back what was there) makes no undo step and leaves a clean
+  presentation clean, so a dialog chain that ends by opening a file doesn't ask to save first.
 
 **Macros** (`"macros"` in the manifest): `macros/list`, `macros/run {name, control?: {id, tag}}`,
 `macros/modules`, `macros/saveModule {name, source}`, `macros/deleteModule {name}`,
@@ -208,6 +210,7 @@ A macro is one undo step; a run-time error takes everything it did back
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | patch | Aligned with GridCraft and WordCraft: during document events `host/sync` and `host/vbaProject/*` are refused, reads too; a command that changes nothing makes no undo step |
 | 2026-10-15 | minor | Protocol 1.2: `host.features` and `host.language`, `context.document`, command results `open` and `dialog` (host-drawn list, form and message dialogs that chain), manifest `events` and `events/documentOpened`, `documentSaved`, `documentClosed` |
 | 2026-10-15 | minor | Ribbon buttons that run macros (`customUI14.xml`, `macros/run` gets `control`); Record Macro and `developer.recordToCode` (`macros/record`), a DeckCraft extra |
 | 2026-10-14 | major | First version: add-ins (shared manifest and protocol 1 and 1.1), Office add-ins' task panes with DeckCraft's Office.js, VBA macros through craft-vba, the Developer tab |
