@@ -142,9 +142,15 @@ pub fn has_text_or_shapes(s: &Session) -> std::result::Result<(), String> {
 }
 
 pub fn can_undo(s: &Session) -> std::result::Result<(), String> {
+    if let Some(can) = crate::collab::room_undo(s, false) {
+        return if can { Ok(()) } else { Err("nothing to undo".into()) };
+    }
     if s.active().is_some_and(|d| !d.history.undo.is_empty()) { Ok(()) } else { Err("nothing to undo".into()) }
 }
 pub fn can_redo(s: &Session) -> std::result::Result<(), String> {
+    if let Some(can) = crate::collab::room_undo(s, true) {
+        return if can { Ok(()) } else { Err("nothing to redo".into()) };
+    }
     if s.active().is_some_and(|d| !d.history.redo.is_empty()) { Ok(()) } else { Err("nothing to redo".into()) }
 }
 
@@ -191,6 +197,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(inspect::specs());
         v.extend(media::specs());
         v.extend(plugins::specs());
+        v.extend(crate::collab::specs());
         v.extend(office::specs());
         v.extend(developer::specs());
         v.extend(artistic::specs());

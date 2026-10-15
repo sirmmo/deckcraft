@@ -39,7 +39,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Run Add-in Command",
             [],
             None,
-            "{plugin, command, params?} → {ran, message?, result?, open?: {path, label?, readOnly}, dialog?}. The add-in's commands run as one undoable step; `open` and `dialog` (protocol 1.2) are for the caller to act on: the app's own buttons and menus open the file or show the dialog, a programmatic run only returns them",
+            "{plugin, command, params?} → {ran, message?, result?, open?: {path, label?, readOnly}, dialog?, collab?: {join}}. The add-in's commands run as one undoable step; `open` and `dialog` (protocol 1.2) and `collab.join` (a live session, protocol 2) are for the caller to act on: the app's own buttons and menus open the file, show the dialog or join the room, a programmatic run only returns them",
             always,
             run
         ),
@@ -278,6 +278,10 @@ fn run(s: &mut Session, p: &Json) -> Result<Json> {
     }
     if let Some(dialog) = reply.dialog {
         out["dialog"] = serde_json::to_value(dialog).unwrap_or(Json::Null);
+    }
+    // Protocol 2: a room to join or start, for the caller (the interface runs `collab.join`).
+    if let Some(j) = reply.collab_join {
+        out["collab"] = json!({"join": j});
     }
     Ok(out)
 }

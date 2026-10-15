@@ -232,6 +232,23 @@ fn remove_stale_locks(dir: &Path) {
     }
 }
 
+/// Live sessions keep each room's whole state in the app's recovery folder (the host sets it;
+/// never a path a command names), so a crash and rejoin merges instead of losing edits.
+pub(crate) fn write_room(dir: &std::path::Path, name: &str, body: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(name), body)
+}
+
+/// A room's state that [`write_room`] kept.
+pub(crate) fn read_room(dir: &std::path::Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join(name)).ok()
+}
+
+/// Forgets a room's kept state (the person left it).
+pub(crate) fn remove_room(dir: &std::path::Path, name: &str) {
+    let _ = std::fs::remove_file(dir.join(name));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

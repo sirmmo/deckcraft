@@ -101,13 +101,30 @@ fn command_replies_are_checked() {
 }
 
 #[test]
-fn initialize_announces_protocol_1_2() {
+fn initialize_announces_protocols_1_2_and_2() {
     let p = crate::initialize_params("t.init", std::path::Path::new("/tmp"));
     assert_eq!(p["protocolVersion"], 1, "protocolVersion stays 1");
-    assert_eq!(p["host"]["features"], json!(["dialogs", "open", "events", "document"]));
+    assert_eq!(p["host"]["features"], json!(["dialogs", "open", "events", "document", "push", "collab"]));
+    assert_eq!(p["host"]["collab"], json!({"formats": ["yjs-v1"], "app": "deckcraft", "schema": 1, "encryption": ["aes-256-gcm"]}));
     assert_eq!(p["host"]["language"], "en");
     crate::set_host_language("not a tag!");
     assert_eq!(crate::host_language(), "en", "a bad tag is ignored");
+}
+
+#[test]
+fn transports_declare_themselves_and_answer_with_rooms() {
+    let m = Manifest::parse(
+        &json!({"id": "t.tr", "name": "T", "run": {"command": "true"}, "collab": {"transport": "mqtt", "label": "Live (MQTT)"}}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(m.collab.as_ref().map(|c| c.transport.as_str()), Some("mqtt"));
+    for bad in [json!({"transport": ""}), json!({"transport": "x".repeat(65)}), json!({"transport": "m", "label": "l".repeat(65)})] {
+        assert!(Manifest::parse(&json!({"id": "t.tr", "name": "T", "run": {"command": "true"}, "collab": bad}).to_string()).is_err(), "{bad}");
+    }
+    let r = parse_reply(json!({"collab": {"join": {"room": "mqtt:x", "mode": "share"}}, "message": "hi"})).unwrap();
+    assert_eq!(r.collab_join.unwrap()["room"], "mqtt:x");
+    assert!(parse_reply(json!({"collab": {"join": "nope"}})).is_err());
+    assert!(parse_reply(json!({"collab": {"join": null}})).unwrap().collab_join.is_none());
 }
 
 #[test]

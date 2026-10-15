@@ -13,6 +13,7 @@ deckcraft-geom = { workspace = true }
 deckcraft-color = { workspace = true }
 deckcraft-model = { workspace = true }
 deckcraft-plugin = { workspace = true }
+deckcraft-collab = { workspace = true }
 deckcraft-fonts = { workspace = true }
 deckcraft-text = { workspace = true }
 deckcraft-render = { workspace = true }
@@ -39,4 +40,14 @@ js-sys = "0.3"
 # runs without libtest's harness (standard output is the protocol's alone).
 [[test]]
 name = "addins"
+harness = false
+
+# Runs without libtest: the test binary doubles as the co-editing transport it starts.
+[[test]]
+name = "collab_push"
+harness = false
+
+# Runs without libtest: the test binary doubles as the two DeckCraft peers it starts.
+[[test]]
+name = "collab_loopback"
 harness = false

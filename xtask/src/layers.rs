@@ -53,6 +53,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("fonts", Class::Layer(1)),
     ("text", Class::Layer(2)),
     ("anim", Class::Layer(2)),
+    // Co-editing (plugin protocol 2): the presentation as a Yjs document, encryption, awareness.
+    ("collab", Class::Layer(2)),
     ("format", Class::Layer(2)),
     ("render", Class::Layer(3)),
     ("pptx", Class::Layer(3)),

@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cmd;
+pub mod collab;
 pub mod compare;
 pub mod connect;
 pub mod drawtable;
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
+pub use deckcraft_collab as collab_core;
 pub use deckcraft_geom as geom;
 pub use deckcraft_media as media;
 pub use deckcraft_model as model;
@@ -352,6 +354,10 @@ pub struct Prefs {
     /// Which presentations' macros may run: `disable`, `prompt` (once enabled for the
     /// presentation) or `enable` (Developer › Macro Security).
     pub macro_security: String,
+    /// Live sessions: this person's stable id (made on first use) and colour (`#RRGGBB`); their
+    /// name is [`Prefs::author`].
+    pub collab_user_id: String,
+    pub collab_color: String,
 }
 
 impl Default for Prefs {
@@ -375,6 +381,8 @@ impl Default for Prefs {
             recovery_minutes: 1.0,
             disabled_plugins: Vec::new(),
             macro_security: "prompt".into(),
+            collab_user_id: String::new(),
+            collab_color: String::new(),
         }
     }
 }
@@ -514,6 +522,8 @@ pub struct Session {
     next_loaded: u64,
     /// Document events for add-ins, waiting for the outermost command to finish ([`events`]).
     pub(crate) events: events::Events,
+    /// Live sessions (plugin protocol 2).
+    pub collab: collab::Collab,
 }
 
 impl Default for Session {
@@ -547,6 +557,7 @@ impl Session {
             loaded: vec![],
             next_loaded: 0,
             events: Default::default(),
+            collab: Default::default(),
         }
     }
     /// Hand over a presentation read on another thread ([`cmd::file::read_presentation_file`]);
@@ -615,12 +626,26 @@ impl Session {
     }
 
     /// Run command `id`. A panic inside it becomes [`EngineError::Internal`] and leaves the
-    /// presentation as it was.
+    /// presentation as it was. In a live session the outermost command's change is shared as one
+    /// update, and Undo and Redo are the person's own.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
+        if self.depth == 0
+            && !self.collab.rooms.is_empty()
+            && let Some(r) = collab::intercept(self, id, params)
+        {
+            return r;
+        }
+        if !self.collab.rooms.is_empty()
+            && find_command(id).is_some_and(|spec| spec.undoable)
+            && let Some(why) = collab::read_only(self)
+        {
+            return Err(EngineError::Disabled(id.to_string(), why));
+        }
         let r = self.guarded(id, |s| s.execute_unguarded(id, params));
         // Add-ins hear about opens, saves and closes once the outermost command is done.
         if self.depth == 0 {
             self.flush_events();
+            collab::after_command(self);
         }
         r
     }
@@ -739,7 +764,7 @@ impl Session {
 }
 
 /// Keep the selection pointing at things that exist.
-fn clamp_selection(st: &mut DocState) {
+pub(crate) fn clamp_selection(st: &mut DocState) {
     let n = st.doc.slides.len();
     if n == 0 {
         st.selection.slide = 0;
