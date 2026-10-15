@@ -109,7 +109,7 @@ fn corpus() -> Presentation {
     let mut columns = TextBody::from_text("Two columns\nof vertical text");
     columns.body.columns = Some(3);
     columns.body.col_spacing = Some(18.0);
-    columns.body.autofit = Some(AutoFit::Shrink { font_scale: 0.85, line_reduction: 0.2 });
+    columns.body.autofit = Some(AutoFit::Shrink { font_scale: Some(0.85), line_reduction: 0.2 });
     columns.body.vert = Some(TextDir::Vertical270);
     let mut col = shape(&mut p, "Columns", 480.0, 40.0, 200.0, 160.0);
     col.text = Some(columns);
@@ -176,7 +176,7 @@ fn chart_table_and_text_corpus_round_trips() {
     assert_eq!(plain(cols), "Two columns\nof vertical text");
     assert_eq!(cols.body.columns, Some(3));
     assert_eq!(cols.body.col_spacing, Some(18.0));
-    assert_eq!(cols.body.autofit, Some(AutoFit::Shrink { font_scale: 0.85, line_reduction: 0.2 }));
+    assert_eq!(cols.body.autofit, Some(AutoFit::Shrink { font_scale: Some(0.85), line_reduction: 0.2 }));
     assert_eq!(cols.body.vert, Some(TextDir::Vertical270));
 
     let warp = by_name(slide, "Warp").text.as_ref().expect("warp");

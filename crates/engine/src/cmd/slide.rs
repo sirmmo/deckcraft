@@ -122,7 +122,7 @@ fn new(s: &mut Session, p: &Value) -> Result<Value> {
             sh.text = Some(TextBody::from_text(t));
         }
         if let Some(b) = str_param(p, "body")
-            && let Some(sh) = slide.shapes.iter_mut().find(|x| x.ph_type().is_some_and(|k| !k.is_title()))
+            && let Some(sh) = body_placeholder(&mut slide.shapes)
         {
             let mut body = TextBody::from_text(b);
             // Leading tabs set the outline level, as in text.set.
@@ -156,6 +156,25 @@ fn new(s: &mut Session, p: &Value) -> Result<Value> {
         sel.target = Target::Slides;
         Ok(json!({"index": at, "id": id}))
     })
+}
+
+/// The placeholder a new slide's `body` goes into: the layout's main content placeholder.
+/// Prefers `idx="1"` (the content slot PowerPoint fills), then a full-size text placeholder over
+/// a `half`/`quarter` one, then a text placeholder over a picture/chart/table one; ties keep
+/// shape order, so a layout with a single body placeholder behaves as before.
+fn body_placeholder(shapes: &mut [deckcraft_model::Shape]) -> Option<&mut deckcraft_model::Shape> {
+    use deckcraft_model::PhType;
+    let rank = |sh: &deckcraft_model::Shape| {
+        let ph = sh.ph.as_ref()?;
+        if ph.kind.is_title() {
+            return None;
+        }
+        let text = matches!(ph.kind, PhType::Body | PhType::Obj | PhType::SubTitle);
+        let small = matches!(ph.size.as_deref(), Some("half" | "quarter"));
+        Some((ph.idx != 1, small, !text))
+    };
+    let best = shapes.iter().enumerate().filter_map(|(i, sh)| rank(sh).map(|r| (r, i))).min()?.1;
+    shapes.get_mut(best)
 }
 
 fn index_of(s: &Session, p: &Value) -> Result<usize> {

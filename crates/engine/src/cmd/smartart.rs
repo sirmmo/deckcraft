@@ -541,7 +541,7 @@ fn shadow(blur: f64, dist: f64) -> Shadow {
 /// `title` false every line is a bullet (the bullet boxes of the bullet lists).
 fn text_shape(preset: &str, x: Xfrm, lines: &[&DiagramNode], title: bool) -> Shape {
     let mut body = TextBody::default();
-    body.body.autofit = Some(AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 });
+    body.body.autofit = Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 });
     let top = lines.first().map(|n| if title { n.level } else { n.level.saturating_sub(1) }).unwrap_or(0);
     for (k, n) in lines.iter().enumerate() {
         let mut para = Paragraph::new(&n.text);
@@ -1913,7 +1913,7 @@ fn to_text(s: &mut Session, p: &Value) -> Result<Value> {
             body.paragraphs.push(Paragraph::new(""));
         }
         body.body.wrap = Some(true);
-        body.body.autofit = Some(AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 });
+        body.body.autofit = Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 });
         let id = ShapeId(doc.alloc_id().ok_or_else(|| bad(CMD, NO_ID_SPACE))?);
         let tb =
             Shape { id, name: "Text".into(), xfrm: Some(area), text_box: true, text: Some(body), geom: Geom::preset("rect"), ..Default::default() };

@@ -203,13 +203,13 @@ pub fn build_master(size: Size, theme: Theme, first_id: u32) -> (Master, u32) {
     let title_box = |b: &mut B| {
         let (x, y, ww, hh) = r(60.0, 29.0, 840.0, 104.0);
         let mut s = b.shape("Title 1", PhType::Title, 0, x, y, ww, hh);
-        s.text = Some(body_with(Some(Anchor::Middle), Some(AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 })));
+        s.text = Some(body_with(Some(Anchor::Middle), Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 })));
         s
     };
     let body_box = |b: &mut B, name: &str, idx: u32, x: f64, y: f64, ww: f64, hh: f64| {
         let (x, y, ww, hh) = r(x, y, ww, hh);
         let mut s = b.shape(name, PhType::Body, idx, x, y, ww, hh);
-        s.text = Some(body_with(Some(Anchor::Top), Some(AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 })));
+        s.text = Some(body_with(Some(Anchor::Top), Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 })));
         s
     };
 
@@ -263,7 +263,7 @@ pub fn build_master(size: Size, theme: Theme, first_id: u32) -> (Master, u32) {
         t.text = Some(TextBody {
             body: BodyProps {
                 anchor: Some(Anchor::Bottom),
-                autofit: Some(AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 }),
+                autofit: Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 }),
                 ..Default::default()
             },
             list_style: ls,
@@ -288,7 +288,7 @@ pub fn build_master(size: Size, theme: Theme, first_id: u32) -> (Master, u32) {
         st.text = Some(TextBody {
             body: BodyProps {
                 anchor: Some(Anchor::Top),
-                autofit: Some(AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 }),
+                autofit: Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 }),
                 ..Default::default()
             },
             list_style: ls,

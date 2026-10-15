@@ -690,6 +690,29 @@ mod tests {
         }
     }
 
+    /// A body whose file had no `fontScale` (`<a:normAutofit/>`) keeps that state through the
+    /// native format: it is drawn at 100 % and only fitted when its text changes (#724).
+    #[test]
+    fn a_bare_normautofit_body_round_trips() {
+        use deckcraft_model::text::{AutoFit, TextBody};
+        let mut p = Presentation::default();
+        let mut body = TextBody::from_text("Overflowing");
+        body.body.autofit = Some(AutoFit::Shrink { font_scale: None, line_reduction: 0.0 });
+        let sh = deckcraft_model::Shape { text: Some(body), ..Default::default() };
+        Arc::make_mut(&mut p.slides[0]).shapes.push(sh);
+        let back = load(&save(&p).unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        let body = back.slides[0].shapes.last().unwrap().text.clone().unwrap();
+        assert_eq!(body.body.autofit, Some(AutoFit::Shrink { font_scale: None, line_reduction: 0.0 }));
+        // A scale the file saved round-trips as itself.
+        let mut body = TextBody::from_text("Overflowing");
+        body.body.autofit = Some(AutoFit::Shrink { font_scale: Some(0.62), line_reduction: 0.2 });
+        let sh = deckcraft_model::Shape { text: Some(body), ..Default::default() };
+        Arc::make_mut(&mut p.slides[0]).shapes.push(sh);
+        let back = load(&save(&p).unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        let body = back.slides[0].shapes.last().unwrap().text.clone().unwrap();
+        assert_eq!(body.body.autofit, Some(AutoFit::Shrink { font_scale: Some(0.62), line_reduction: 0.2 }));
+    }
+
     /// Only `null`s where numbers belong are patched: other damage still fails.
     #[test]
     fn other_damage_is_still_reported() {

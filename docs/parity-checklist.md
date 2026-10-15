@@ -1,6 +1,6 @@
 # PowerPoint feature checklist
 
-> **Generated:** 2026-10-14 (summary by `cargo xtask parity`; rows re-scored by the 2026-10-14 community PR wave, duplicate Thesaurus, AutoCorrect, Artistic effects and Corrections rows folded; Preview in editor re-scored 2026-10-13; earlier rows re-scored 2026-10-10 against PowerPoint for Mac 16.113.4; video/animated GIF row re-scored 2026-10-11, #171) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Generated:** 2026-10-14 (bullets/numbering remain D after empty-line marker review; summary by `cargo xtask parity`; rows re-scored by the 2026-10-14 community PR wave, duplicate Thesaurus, AutoCorrect, Artistic effects and Corrections rows folded; Preview in editor re-scored 2026-10-13; earlier rows re-scored 2026-10-10 against PowerPoint for Mac 16.113.4; video/animated GIF row re-scored 2026-10-11, #171) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 The summary between `<!-- SUMMARY -->
 **Weighted breadth parity: 84%** over 191 features.
@@ -145,7 +145,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Text | Change case, grow/shrink font, clear formatting | P1 | D |
 | Text | Text outline and text effects | P2 | P |
 | Text | Paragraph alignment, indents, spacing, line spacing | P0 | D |
-| Text | Bullets and numbering | P0 | D |
+| Text | Bullets and numbering (including gray empty-line markers while editing) | P0 | D |
 | Text | Picture bullets, custom bullet symbols | P2 | P |
 | Text | List levels (Tab / Shift+Tab) | P0 | D |
 | Text | Tab stops | P2 | D |
@@ -228,7 +228,7 @@ Open P0 items: Contextual tabs (Shape Format, Picture Format, Table Design/Layou
 | Undo & clipboard | Unlimited undo/redo | P0 | D |
 | Undo & clipboard | Cut, copy, paste shapes and slides | P0 | D |
 | Undo & clipboard | Paste special (keep formatting, picture, text only) | P1 | D |
-| Automation (✱) | Every command scriptable (CLI, control channel, MCP) | P0 | D |
+| Automation (✱) | Every command scriptable (CLI, control channel, MCP; remote reply IDs, envelopes and framing validated, #718) | P0 | D |
 | Automation (✱) | Headless rendering and conversion | P0 | D |
 | Platforms (✱) | macOS, Windows, Linux builds | P0 | P |
 | Platforms (✱) | Web (WASM) build | P1 | D |

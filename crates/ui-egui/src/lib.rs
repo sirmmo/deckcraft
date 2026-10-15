@@ -1879,6 +1879,10 @@ impl SlideApp {
     fn drain_control(&mut self, ctx: &egui::Context) {
         let Some(rx) = self.control_rx.take() else { return };
         while let Ok(req) = rx.try_recv() {
+            // A request whose sender gave up waiting (reply timeout) must not run late (#719).
+            if !req.take() {
+                continue;
+            }
             let reply = req.reply.clone();
             match control::handle(self, ctx, &req) {
                 control::Outcome::Done(v) => {
@@ -2573,6 +2577,71 @@ mod tests {
         assert!((harness.state().session.prefs.grid_spacing - 6.0).abs() < 1e-9);
     }
 
+    /// Preferences (#752): Cancel, Esc and the window's close button put back what the dialog
+    /// changed while it was open; Done keeps it.
+    #[test]
+    fn preferences_cancel_restores_the_settings_done_keeps_them() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
+            |ui, app: &mut SlideApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            SlideApp::new(Session::with_new(), Services::default()),
+        );
+        harness.run_steps(2);
+        let before = harness.state().session.prefs.clone();
+        let dark_before = harness.state().ui.brightness;
+        let change = |harness: &mut egui_kittest::Harness<'static, SlideApp>| {
+            harness.state_mut().run("app.preferences", json!({})).unwrap();
+            harness.run_steps(2);
+            for label in ["Dark appearance", "Show smart guides", "Snap objects to grid"] {
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::CheckBox, label)
+                    .next()
+                    .unwrap_or_else(|| panic!("no {label} checkbox"))
+                    .click_accesskit();
+                harness.run_steps(2);
+            }
+            assert_ne!(harness.state().ui.brightness, dark_before, "the dialog previews the appearance");
+            assert_ne!(harness.state().session.prefs.smart_guides, before.smart_guides);
+        };
+        let unchanged = |harness: &egui_kittest::Harness<'static, SlideApp>, how: &str| {
+            let s = harness.state();
+            assert!(s.dialog.is_none(), "{how} closes Preferences");
+            assert_eq!(s.ui.brightness, dark_before, "{how} restores the appearance");
+            assert_eq!(s.session.prefs.smart_guides, before.smart_guides, "{how} restores smart guides");
+            assert_eq!(s.session.prefs.snap_to_grid, before.snap_to_grid, "{how} restores snap to grid");
+        };
+
+        change(&mut harness);
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Cancel")
+            .next()
+            .unwrap_or_else(|| panic!("no Cancel button"))
+            .click_accesskit();
+        harness.run_steps(2);
+        unchanged(&harness, "Cancel");
+
+        change(&mut harness);
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+        unchanged(&harness, "Esc");
+
+        change(&mut harness);
+        harness
+            .query_all_by_role_and_label(egui::accesskit::Role::Button, "Done")
+            .next()
+            .unwrap_or_else(|| panic!("no Done button"))
+            .click_accesskit();
+        harness.run_steps(2);
+        let s = harness.state();
+        assert!(s.dialog.is_none(), "Done closes Preferences");
+        assert_ne!(s.ui.brightness, dark_before, "Done keeps the appearance");
+        assert_ne!(s.session.prefs.smart_guides, before.smart_guides, "Done keeps smart guides");
+        assert_ne!(s.session.prefs.snap_to_grid, before.snap_to_grid, "Done keeps snap to grid");
+    }
+
     fn canvas_harness() -> egui_kittest::Harness<'static, SlideApp> {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
             |ui, app: &mut SlideApp| {
@@ -3252,5 +3321,39 @@ mod tests {
         harness.run_steps(1);
         flick(&mut harness, egui::vec2(-24.0, 0.0));
         assert_eq!(harness.state().show.as_ref().map(|s| s.state.slide), Some(0));
+    }
+
+    /// Preferences › Interface size (#767): dragging the slider leaves the interface size alone
+    /// until the pointer lets go, so the slider doesn't grow under the pointer mid-drag.
+    #[test]
+    fn interface_size_applies_when_the_slider_is_let_go() {
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
+            |ui, app: &mut SlideApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            SlideApp::new(Session::with_new(), Services::default()),
+        );
+        harness.run_steps(2);
+        harness.state_mut().run("app.preferences", json!({})).unwrap();
+        harness.run_steps(4);
+        let before = harness.state().ui.ui_scale;
+        let rect =
+            harness.query_all_by_role_and_label(egui::accesskit::Role::Slider, "Interface size").next().expect("the Interface size slider").rect();
+        let (from, to) = (rect.left_center() + egui::vec2(4.0, 0.0), rect.right_center() - egui::vec2(4.0, 0.0));
+        harness.hover_at(from);
+        harness.run_steps(1);
+        harness.drag_at(from);
+        harness.run_steps(1);
+        for k in 1..=8 {
+            harness.hover_at(from.lerp(to, k as f32 / 8.0));
+            harness.run_steps(1);
+        }
+        assert_eq!(harness.state().ui.ui_scale, before, "nothing rescales while the slider is held");
+        harness.drop_at(to);
+        harness.run_steps(2);
+        let after = harness.state().ui.ui_scale;
+        assert!(after > before + 0.3, "letting go applies the size dragged to: {before} -> {after}");
+        assert!(harness.state().dialog.is_some(), "Preferences stays open");
     }
 }
