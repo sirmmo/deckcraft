@@ -456,7 +456,11 @@ mod office {
         );
         assert_eq!(
             o.commands["Acme.Refresh"],
-            OfficeCommand::ExecuteFunction { function: "refreshAll".into(), url: "https://acme.example/commands.html".into() }
+            OfficeCommand::ExecuteFunction {
+                function: "refreshAll".into(),
+                url: "https://acme.example/commands.html".into(),
+                control: "Acme.Refresh".into()
+            }
         );
         assert_eq!(m.ui.ribbon.len(), 2);
         assert_eq!((m.ui.ribbon[0].tab.as_str(), m.ui.ribbon[0].group.as_str()), ("Home", "Acme"));
@@ -500,7 +504,7 @@ mod office {
         let xml = MANIFEST.replace("0d5c7a1e-1111-4bcd-9eaf-0123456789ab", "0d5c7a1e-2222-4bcd-9eaf-0123456789ab").replace(
             r#"<Requirements><Sets DefaultMinVersion="1.1"><Set Name="PowerPointApi" MinVersion="1.3"/></Sets></Requirements>"#,
             r#"<Requirements><Sets DefaultMinVersion="1.9"><Set Name="PowerPointApi"/><Set Name="Selection" MinVersion="1.1"/></Sets>
-               <Methods><Method Name="Document.getSelectedDataAsync"/><Method Name="Document.goToByIdAsync"/></Methods></Requirements>"#,
+               <Methods><Method Name="Document.getSelectedDataAsync"/><Method Name="Document.getFileAsync"/></Methods></Requirements>"#,
         );
         assert_ne!(xml, MANIFEST);
         let m = parse_manifest(&xml, "deckcraft").unwrap();
@@ -510,13 +514,13 @@ mod office {
             [("PowerPointApi".to_string(), "1.9".to_string()), ("Selection".to_string(), "1.1".to_string())],
             "DefaultMinVersion applies"
         );
-        assert_eq!(o.methods, ["Document.getSelectedDataAsync", "Document.goToByIdAsync"]);
+        assert_eq!(o.methods, ["Document.getSelectedDataAsync", "Document.getFileAsync"]);
         let id = m.id.clone();
         crate::install(m, std::env::temp_dir()).unwrap();
         let p = crate::get(&id).unwrap();
         assert_eq!(p.state(), "blocked");
         let why: Vec<String> = p.blocked_by().iter().map(|b| b.message.clone()).collect();
-        assert_eq!(why, ["Needs PowerPointApi 1.9; DeckCraft supports up to 1.4", "Needs Document.goToByIdAsync, which DeckCraft doesn't support"]);
+        assert_eq!(why, ["Needs PowerPointApi 1.9; DeckCraft supports up to 1.4", "Needs Document.getFileAsync, which DeckCraft doesn't support"]);
         assert!(run_command(&id, "taskpane", serde_json::json!({}), serde_json::json!({})).unwrap_err().contains("blocked"));
         assert!(crate::unload(&id));
     }

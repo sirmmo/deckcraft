@@ -5,8 +5,10 @@
 //! permissions. Macro add-ins reach the same objects (`host/sync`, [`super::developer`]).
 //!
 //! The objects follow the PowerPoint JavaScript API's public reference: `presentation`, `slides`,
-//! `slide`, `shapes`, `shape`, `textFrame`, `textRange`, `font`, `fill`, `lineFormat`, the selection,
-//! and the common API's `document` (selected text) and settings (docs/officejs.md). Writes go
+//! `slide`, `shapes`, `shape`, `textFrame`, `textRange`, `font`, `fill`, `lineFormat`, `tags`, the
+//! selection, `insertSlidesFromBase64`, and the common API's `document` (selected text or slide
+//! range, an image put in, `goToById`) and settings (docs/officejs.md). Colours are `#RRGGBB` or CSS
+//! colour names. Writes go
 //! through DeckCraft's own commands (`slide.new`, `shape.setBounds`, `text.set`, `format.bold`…), on
 //! the slide the object is on; reads resolve placeholders, theme colours and fonts as they're drawn.
 
@@ -20,6 +22,8 @@ use serde_json::{Value as Json, json};
 
 use super::{CommandSpec, always, bad, cmd, str_param};
 use crate::{EngineError, Result, Session, Target};
+
+mod colors;
 
 /// Most items a collection load answers.
 const MAX_ITEMS: usize = 10_000;
@@ -65,11 +69,27 @@ enum Obj {
     Font(SlideId, ShapeId),
     Fill(SlideId, ShapeId),
     Line(SlideId, ShapeId),
+    /// The add-in tags of the presentation, a slide or a shape (`tags`), and one by key.
+    Tags(Owner),
+    Tag(Owner, String),
     /// The common API's `Office.context.document` (the selection as text).
     Document,
     /// `Office.context.document.settings`.
     Settings,
 }
+
+/// What a [`Obj::Tags`] collection belongs to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Owner {
+    Presentation,
+    Slide(SlideId),
+    Shape(SlideId, ShapeId),
+}
+
+/// Most tags one object keeps, and the longest key and value.
+const MAX_TAGS: usize = 10_000;
+const MAX_TAG_KEY: usize = 255;
+const MAX_TAG_VALUE: usize = 1 << 20;
 
 /// An Office.js error: its code (`ItemNotFound`, `InvalidArgument`, `AccessDenied`…) and message.
 struct OfficeError(&'static str, String);
@@ -195,7 +215,7 @@ fn run_action(s: &mut Session, addin: &str, perm: Permission, a: &Action) -> R<J
             let obj = resolve_path(s, path)?;
             match (&obj, method.as_str()) {
                 (Obj::Settings, _) => {}
-                (Obj::Document, "getSelectedData") => need_read(perm)?,
+                (Obj::Document, "getSelectedData" | "goToById") => need_read(perm)?,
                 _ => need_write(perm)?,
             }
             call(s, addin, &obj, method, args)
@@ -366,6 +386,22 @@ fn resolve_path(s: &Session, path: &[Step]) -> R<Obj> {
                 Obj::TextRange(*sl, *id, start.saturating_add(from), len)
             }
             (Obj::TextRange(sl, id, ..), Step::Prop { p }) if p == "font" => Obj::Font(*sl, *id),
+            (Obj::Presentation, Step::Prop { p }) if p == "tags" => Obj::Tags(Owner::Presentation),
+            (Obj::Slide(id), Step::Prop { p }) if p == "tags" => Obj::Tags(Owner::Slide(*id)),
+            (Obj::Shape(sl, id), Step::Prop { p }) if p == "tags" => Obj::Tags(Owner::Shape(*sl, *id)),
+            (Obj::Tags(owner), Step::Method { m, a }) if m == "getItem" => {
+                let key = arg_str(a, 0).ok_or_else(|| invalid("getItem needs a tag's key"))?;
+                let tags = tags_of(s, *owner)?;
+                let (k, _) =
+                    tags.iter().find(|(k, _)| k.eq_ignore_ascii_case(key.trim())).ok_or_else(|| not_found(format!("there's no tag {key}")))?;
+                Obj::Tag(*owner, k.clone())
+            }
+            (Obj::Tags(owner), Step::Method { m, a }) if m == "getItemAt" => {
+                let i = arg_index(a, 0)?;
+                let tags = tags_of(s, *owner)?;
+                let (k, _) = tags.get(i).ok_or_else(|| not_found(format!("there's no tag at index {i} (there are {})", tags.len())))?;
+                Obj::Tag(*owner, k.clone())
+            }
             (o, step) => return Err(invalid(format!("{} has no {}", name(o), step_name(step)))),
         };
         // Every step lands on something that exists.
@@ -400,6 +436,8 @@ fn name(o: &Obj) -> &'static str {
         Obj::Font(..) => "ShapeFont",
         Obj::Fill(..) => "ShapeFill",
         Obj::Line(..) => "ShapeLineFormat",
+        Obj::Tags(_) => "TagCollection",
+        Obj::Tag(..) => "Tag",
         Obj::Document => "Document",
         Obj::Settings => "Settings",
     }
@@ -516,6 +554,16 @@ fn load(s: &mut Session, addin: &str, obj: &Obj, props: &[String]) -> R<Json> {
                 Json::Array(layouts.iter().take(MAX_ITEMS).map(|l| json!({"id": l.id.0.to_string(), "name": l.name})).collect())
             }
             (Obj::Masters | Obj::Layouts(_), _) if props.iter().any(|p| p == "items") => continue,
+            (Obj::Tags(owner), "count") => json!(tags_of(s, *owner)?.len()),
+            (Obj::Tags(owner), "items") => {
+                Json::Array(tags_of(s, *owner)?.iter().take(MAX_ITEMS).map(|(k, v)| json!({"key": k, "value": v})).collect())
+            }
+            (Obj::Tags(_), _) if props.iter().any(|p| p == "items") => continue,
+            (Obj::Tag(owner, key), p @ ("key" | "value")) => {
+                let tags = tags_of(s, *owner)?;
+                let (k, v) = tags.iter().find(|(k, _)| k == key).ok_or_else(|| not_found(format!("there's no tag {key}")))?;
+                if p == "key" { json!(k) } else { json!(v) }
+            }
             (Obj::MasterAt(i), p @ ("id" | "name")) => {
                 let m = doc(s)?.doc.masters.get(*i).ok_or_else(|| not_found("no such slide master"))?;
                 if p == "id" { json!(m.id.0.to_string()) } else { json!(m.name) }
@@ -693,13 +741,10 @@ fn num(value: &Json, what: &str) -> R<f64> {
     value.as_f64().filter(|v| v.is_finite()).ok_or_else(|| invalid(format!("{what} is a number")))
 }
 
+/// A colour as add-ins give it: `#RRGGBB` or a CSS colour name (`"red"`), any case.
 fn color(value: &Json) -> R<String> {
-    let c = value.as_str().map(str::trim).filter(|c| !c.is_empty()).ok_or_else(|| invalid("a colour is a string like #FF0000"))?;
-    let hexed = c.trim_start_matches('#');
-    if deckcraft_model::Rgba::from_hex(hexed).is_none() {
-        return Err(invalid(format!("`{c}` isn't a colour like #FF0000")));
-    }
-    Ok(format!("#{hexed}"))
+    let c = value.as_str().map(str::trim).filter(|c| !c.is_empty()).ok_or_else(|| invalid("a colour is a string like #FF0000 or red"))?;
+    colors::parse(c).ok_or_else(|| invalid(format!("`{}` isn't a colour like #FF0000 or red", c.chars().take(40).collect::<String>())))
 }
 
 fn set(s: &mut Session, obj: &Obj, prop: &str, value: &Json) -> R<()> {
@@ -813,9 +858,67 @@ fn set(s: &mut Session, obj: &Obj, prop: &str, value: &Json) -> R<()> {
             params["ids"] = json!([id.0]);
             on(s, *sl, vec![*id], |s| run(s, "shape.line", params))?;
         }
+        (Obj::Tag(owner, key), "value") => {
+            let v = tag_value(value)?;
+            let key = key.clone();
+            edit_tags(s, *owner, |tags| {
+                if let Some(t) = tags.iter_mut().find(|(k, _)| *k == key) {
+                    t.1 = v;
+                }
+                Ok(())
+            })?;
+        }
         (o, p) => return Err(invalid(format!("{}.{p} can't be set", name(o)))),
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- tags
+
+/// The tags of the presentation, a slide or a shape.
+fn tags_of(s: &Session, owner: Owner) -> R<&Vec<(String, String)>> {
+    match owner {
+        Owner::Presentation => Ok(&doc(s)?.doc.tags),
+        Owner::Slide(id) => Ok(&slide_of(s, id)?.tags),
+        Owner::Shape(sl, id) => Ok(&shape_of(s, sl, id)?.tags),
+    }
+}
+
+/// Changes the tags of the presentation, a slide or a shape.
+fn edit_tags(s: &mut Session, owner: Owner, f: impl FnOnce(&mut Vec<(String, String)>) -> R<()>) -> R<()> {
+    tags_of(s, owner)?;
+    let mut failure = None;
+    s.edit(|d, _| {
+        let tags = match owner {
+            Owner::Presentation => Some(&mut d.tags),
+            Owner::Slide(id) => d.slide_mut(id).map(|sl| &mut sl.tags),
+            Owner::Shape(sl, id) => d.slide_mut(sl).and_then(|sl| sl.shape_mut(id)).map(|sh| &mut sh.tags),
+        };
+        match tags {
+            Some(t) => failure = f(t).err(),
+            None => failure = Some(not_found("the tags' slide or shape is gone")),
+        }
+        Ok(())
+    })
+    .map_err(engine)?;
+    failure.map_or(Ok(()), Err)
+}
+
+/// A tag's key as PowerPoint keeps it: upper case.
+fn tag_key(v: Option<&Json>) -> R<String> {
+    let k = v.and_then(Json::as_str).map(str::trim).filter(|k| !k.is_empty()).ok_or_else(|| invalid("a tag's key is a non-empty string"))?;
+    if k.chars().count() > MAX_TAG_KEY || k.chars().any(char::is_control) {
+        return Err(invalid(format!("a tag's key is at most {MAX_TAG_KEY} characters, without control characters")));
+    }
+    Ok(k.to_uppercase())
+}
+
+fn tag_value(v: &Json) -> R<String> {
+    let v = v.as_str().ok_or_else(|| invalid("a tag's value is a string"))?;
+    if v.len() > MAX_TAG_VALUE {
+        return Err(invalid("a tag's value is limited to 1 MB"));
+    }
+    Ok(v.to_string())
 }
 
 /// `{left, top, width, height}` of an `add…` call's options (points), with defaults.
@@ -947,6 +1050,53 @@ fn call(s: &mut Session, addin: &str, obj: &Obj, method: &str, args: &[Json]) ->
             on(s, *sl, vec![*id], |s| run(s, "shape.fill", json!({"none": true, "ids": [id.0]})))?;
             Ok(Json::Null)
         }
+        (Obj::Tags(owner), "add") => {
+            let key = tag_key(args.first())?;
+            let value = tag_value(args.get(1).unwrap_or(&Json::Null))?;
+            edit_tags(s, *owner, |tags| {
+                let full = tags.len() >= MAX_TAGS;
+                match tags.iter_mut().find(|(k, _)| *k == key) {
+                    Some(t) => t.1 = value,
+                    None if full => return Err(invalid(format!("at most {MAX_TAGS} tags"))),
+                    None => tags.push((key, value)),
+                }
+                Ok(())
+            })?;
+            Ok(Json::Null)
+        }
+        (Obj::Tags(owner), "delete") => {
+            let key = tag_key(args.first())?;
+            edit_tags(s, *owner, |tags| {
+                tags.retain(|(k, _)| *k != key);
+                Ok(())
+            })?;
+            Ok(Json::Null)
+        }
+        (Obj::Presentation, "insertSlidesFromBase64") => insert_slides(s, args),
+        (Obj::Document, "getSelectedData") if arg_str(args, 0).is_some_and(|k| k.eq_ignore_ascii_case("slideRange")) => {
+            // `{slides: [{id, title, index}]}`: ids as numbers, indexes from 1, as Office answers.
+            let d = doc(s)?;
+            let ids = slide_ids(s, true)?;
+            let slides: Vec<Json> = ids
+                .iter()
+                .filter_map(|id| {
+                    let i = d.doc.slide_index(*id)?;
+                    let sl = d.doc.slide(*id)?;
+                    Some(json!({"id": id.0, "title": slide_title(sl), "index": i + 1}))
+                })
+                .collect();
+            Ok(json!({"slides": slides}))
+        }
+        (Obj::Document, "getSelectedData") if arg_str(args, 0).is_some_and(|k| !k.eq_ignore_ascii_case("text")) => Err(OfficeError(
+            "NotSupported",
+            format!("DeckCraft answers the selection as text or slideRange, not {}", arg_str(args, 0).unwrap_or_default()),
+        )),
+        (Obj::Document, "setSelectedData")
+            if args.get(1).and_then(|o| o.get("coercionType")).and_then(Json::as_str).is_some_and(|k| k.eq_ignore_ascii_case("image")) =>
+        {
+            insert_image(s, args)
+        }
+        (Obj::Document, "goToById") => go_to_by_id(s, args),
         (Obj::Document, "getSelectedData") => {
             let d = doc(s)?;
             let text = d
@@ -1004,6 +1154,137 @@ fn call(s: &mut Session, addin: &str, obj: &Obj, method: &str, args: &[Json]) ->
         }
         (o, m) => Err(OfficeError("NotImplemented", format!("{}.{m}() isn't supported yet", name(o)))),
     }
+}
+
+/// The slide id an add-in gives: `"267"`, `267`, or PowerPoint's `"267#"` / `"267#1234"` forms.
+fn slide_id_arg(v: &Json) -> R<SlideId> {
+    let id = match v {
+        Json::String(t) => t.trim().split('#').next().and_then(|n| n.trim().parse::<u32>().ok()),
+        other => other.as_u64().and_then(|n| u32::try_from(n).ok()),
+    };
+    id.map(SlideId).ok_or_else(|| invalid(format!("`{}` isn't a slide id", v.to_string().chars().take(40).collect::<String>())))
+}
+
+/// Most bytes a presentation or picture an add-in gives as base64 may have.
+const MAX_BASE64: usize = 256 << 20;
+
+/// `presentation.insertSlidesFromBase64(base64, {formatting, sourceSlideIds, targetSlideId})`:
+/// Reuse Slides (`slide.reuse`) with the source slides picked by id, after the target slide (by
+/// default after the current one).
+fn insert_slides(s: &mut Session, args: &[Json]) -> R<Json> {
+    let data = arg_str(args, 0).ok_or_else(|| invalid("insertSlidesFromBase64 needs the presentation as base64"))?;
+    if data.len() > MAX_BASE64 {
+        return Err(invalid("the presentation is limited to 256 MB of base64"));
+    }
+    let o = args.get(1).cloned().unwrap_or(Json::Null);
+    let keep = match o.get("formatting").and_then(Json::as_str) {
+        None => false,
+        Some(f) if f.eq_ignore_ascii_case("KeepSourceFormatting") => true,
+        Some(f) if f.eq_ignore_ascii_case("UseDestinationTheme") => false,
+        Some(f) => {
+            return Err(invalid(format!(
+                "formatting is KeepSourceFormatting or UseDestinationTheme, not {}",
+                f.chars().take(40).collect::<String>()
+            )));
+        }
+    };
+    let mut params = json!({"data": data, "name": "slides.pptx", "keepFormatting": keep});
+    if let Some(Json::Array(wanted)) = o.get("sourceSlideIds") {
+        let bytes = super::base64_decode(data).ok_or_else(|| invalid("the presentation isn't base64"))?;
+        let src = super::file::open_presentation("slides.pptx", &bytes).map_err(|e| invalid(format!("the presentation can't be read: {e}")))?;
+        let mut picked = Vec::new();
+        for v in wanted.iter().take(MAX_ITEMS) {
+            let id = slide_id_arg(v)?;
+            let i = src.slide_index(id).ok_or_else(|| not_found(format!("the inserted presentation has no slide {}", id.0)))?;
+            picked.push(i);
+        }
+        params["slides"] = json!(picked);
+    }
+    if let Some(t) = o.get("targetSlideId").filter(|t| !t.is_null()) {
+        let id = slide_id_arg(t)?;
+        let i = doc(s)?.doc.slide_index(id).ok_or_else(|| not_found(format!("there's no slide {}", id.0)))?;
+        params["at"] = json!(i + 1);
+    }
+    run(s, "slide.reuse", params)?;
+    Ok(Json::Null)
+}
+
+/// `setSelectedDataAsync(base64, {coercionType: "image", imageLeft, imageTop, imageWidth,
+/// imageHeight})`: the picture on the current slide; a missing size keeps the picture's aspect.
+fn insert_image(s: &mut Session, args: &[Json]) -> R<Json> {
+    let data = arg_str(args, 0).ok_or_else(|| invalid("an image is given as base64 text"))?;
+    if data.len() > MAX_BASE64 {
+        return Err(invalid("the image is limited to 256 MB of base64"));
+    }
+    let o = args.get(1).cloned().unwrap_or(Json::Null);
+    let opt = |k: &str| -> R<Option<f64>> {
+        match o.get(k) {
+            None | Some(Json::Null) => Ok(None),
+            Some(v) => v.as_f64().filter(|v| v.is_finite() && v.abs() < 1e6).map(Some).ok_or_else(|| invalid(format!("{k} is a number of points"))),
+        }
+    };
+    let (left, top, width, height) = (opt("imageLeft")?, opt("imageTop")?, opt("imageWidth")?, opt("imageHeight")?);
+    if width.is_some_and(|w| w <= 0.0) || height.is_some_and(|h| h <= 0.0) {
+        return Err(invalid("imageWidth and imageHeight are more than 0"));
+    }
+    let slide = current_slide(s)?;
+    let out = on(s, slide, Vec::new(), |s| run(s, "insert.picture", json!({"data": data, "name": "Picture.png"})))?;
+    let id = out.get("id").and_then(Json::as_u64).and_then(|i| u32::try_from(i).ok()).map(ShapeId);
+    if let Some(id) = id
+        && (left.is_some() || top.is_some() || width.is_some() || height.is_some())
+    {
+        let x = load(s, "", &Obj::Shape(slide, id), &["left".into(), "top".into(), "width".into(), "height".into()])?;
+        let g = |k: &str| x.get(k).and_then(Json::as_f64).unwrap_or(0.0);
+        let (w0, h0) = (g("width").max(1e-6), g("height").max(1e-6));
+        let (w, h) = match (width, height) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, h0 * w / w0),
+            (None, Some(h)) => (w0 * h / h0, h),
+            (None, None) => (w0, h0),
+        };
+        let params = json!({"x": left.unwrap_or(g("left")), "y": top.unwrap_or(g("top")), "w": w, "h": h, "ids": [id.0]});
+        on(s, slide, vec![id], |s| run(s, "shape.setBounds", params))?;
+    }
+    Ok(Json::Null)
+}
+
+/// `goToByIdAsync(id, goToType)`: `slide` (a slide id) or `index` (`first`, `last`, `next`,
+/// `previous`, or a slide number from 1).
+fn go_to_by_id(s: &mut Session, args: &[Json]) -> R<Json> {
+    let id = args.first().cloned().unwrap_or(Json::Null);
+    let kind = arg_str(args, 1).unwrap_or("slide");
+    let d = doc(s)?;
+    let n = d.doc.slides.len();
+    let current = d.selection.slide;
+    let index = if kind.eq_ignore_ascii_case("slide") {
+        let sid = slide_id_arg(&id)?;
+        d.doc.slide_index(sid).ok_or_else(|| not_found(format!("there's no slide {}", sid.0)))?
+    } else if kind.eq_ignore_ascii_case("index") {
+        match &id {
+            Json::String(w) if w.eq_ignore_ascii_case("first") => 0,
+            Json::String(w) if w.eq_ignore_ascii_case("last") => n.saturating_sub(1),
+            Json::String(w) if w.eq_ignore_ascii_case("next") => (current + 1).min(n.saturating_sub(1)),
+            Json::String(w) if w.eq_ignore_ascii_case("previous") => current.saturating_sub(1),
+            other => {
+                let k = other.as_u64().or_else(|| other.as_str().and_then(|t| t.trim().parse().ok())).unwrap_or(0);
+                usize::try_from(k)
+                    .ok()
+                    .filter(|k| (1..=n).contains(k))
+                    .map(|k| k - 1)
+                    .ok_or_else(|| not_found(format!("there's no slide number {other}")))?
+            }
+        }
+    } else {
+        return Err(OfficeError(
+            "NotSupported",
+            format!("DeckCraft goes to slides (by id or index), not to a {}", kind.chars().take(40).collect::<String>()),
+        ));
+    };
+    if n == 0 {
+        return Err(not_found("the presentation has no slides"));
+    }
+    run(s, "slide.go", json!({"index": index}))?;
+    Ok(Json::Null)
 }
 
 #[cfg(test)]

@@ -304,6 +304,18 @@ fn call(d: &mut Deck, t: T, name: &str, args: &[Json]) -> Result<Json, Fail> {
             }
             Ok(Json::Null)
         }
+        (T::Document, "getSelectedData") if args.first().and_then(Json::as_str) == Some("slideRange") => {
+            let slides: Vec<Json> = d
+                .slides
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| d.selected_slides.contains(&s.id))
+                .map(|(i, s)| json!({"id": s.id, "title": "", "index": i + 1}))
+                .collect();
+            Ok(json!({"slides": slides}))
+        }
+        (T::Document, "setSelectedData") if args.get(1).is_some() => Ok(Json::Null),
+        (T::Document, "goToById") => Ok(Json::Null),
         (T::Document, "getSelectedData") => {
             let (s, i) = d.selected_shapes.first().and_then(|id| find_shape(d, *id)).ok_or(("InvalidArgument", "nothing selected".to_string()))?;
             Ok(json!(d.slides[s].shapes[i].text))
@@ -595,7 +607,7 @@ async fn selection_layouts_masters_and_selected_text() {
     assert_eq!(deck(|d| d.slides[0].shapes[0].text.clone()), "Replaced");
     let html = document_async("getSelectedDataAsync", s("html")).await;
     assert_eq!(g(&html, "status").as_string().as_deref(), Some("failed"));
-    assert_eq!(path(&html, &["error", "code"]).as_string().as_deref(), Some("NotImplemented"));
+    assert_eq!(path(&html, &["error", "code"]).as_string().as_deref(), Some("NotSupported"));
 }
 
 /// Calls `Office.context.document.<name>(first, callback)` and waits for the callback's result.
@@ -674,4 +686,242 @@ async fn the_page_transport_posts_and_takes_replies() {
     .unwrap();
     assert_eq!(n.as_f64(), Some(2.0));
     let _ = Reflect::delete_property(&js_sys::global(), &"__craftOffice".into());
+}
+
+// ---------------------------------------------------------------- the common API's newer parts
+
+thread_local! {
+    /// What the page posted that isn't a request (`{"event": …}`).
+    static POSTED: RefCell<Vec<Json>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A host channel that only records the page's events (requests go through the test transport).
+fn record_events() {
+    POSTED.with(|p| p.borrow_mut().clear());
+    let post = Closure::<dyn Fn(String)>::new(|m: String| {
+        let m: Json = serde_json::from_str(&m).unwrap();
+        if m.get("event").is_some() {
+            POSTED.with(|p| p.borrow_mut().push(m));
+        }
+    });
+    let host = js_sys::Object::new();
+    Reflect::set(&host, &"post".into(), &post.into_js_value()).unwrap();
+    Reflect::set(&js_sys::global(), &"__craftOffice".into(), &host).unwrap();
+}
+
+fn stop_recording() {
+    let _ = Reflect::delete_property(&js_sys::global(), &"__craftOffice".into());
+}
+
+fn posted() -> Vec<Json> {
+    POSTED.with(|p| p.borrow().clone())
+}
+
+/// Lets the queued tasks run (a `setTimeout(0)`).
+async fn tick() {
+    let p = Promise::new(&mut |resolve, _| {
+        let set_timeout: Function = global("setTimeout").dyn_into().unwrap();
+        set_timeout.call2(&JsValue::UNDEFINED, &resolve, &JsValue::from(0)).unwrap();
+    });
+    JsFuture::from(p).await.unwrap();
+}
+
+async fn ready() {
+    JsFuture::from(call_js(&global("Office"), "onReady", &[]).dyn_into::<Promise>().unwrap()).await.unwrap();
+}
+
+/// A JS function that records its first argument under `name`.
+fn recorder(name: &'static str) -> JsValue {
+    Closure::<dyn Fn(JsValue)>::new(move |arg: JsValue| {
+        LOG.with(|l| l.borrow_mut().push(json!({"called": name, "arg": from_js(&arg)})));
+    })
+    .into_js_value()
+}
+
+fn calls(name: &str) -> Vec<Json> {
+    log().into_iter().filter(|e| e["called"] == name).map(|e| e["arg"].clone()).collect()
+}
+
+#[wasm_bindgen_test]
+async fn enums_request_context_and_set() {
+    setup();
+    ready().await;
+    let office = global("Office");
+    for (e, k, v) in [
+        ("EventType", "DocumentSelectionChanged", "documentSelectionChanged"),
+        ("Index", "First", "first"),
+        ("GoToType", "Slide", "slide"),
+        ("GoToType", "Index", "index"),
+        ("CoercionType", "Image", "image"),
+        ("CoercionType", "SlideRange", "slideRange"),
+        ("HostType", "PowerPoint", "PowerPoint"),
+        ("InitializationReason", "Inserted", "inserted"),
+    ] {
+        assert_eq!(path(&office, &[e, k]).as_string().as_deref(), Some(v), "Office.{e}.{k}");
+    }
+    // Office's members can't be swapped by a later script.
+    let _ = Reflect::set(&office, &"onReady".into(), &JsValue::from(1));
+    assert!(g(&office, "onReady").is_function());
+    let _ = Reflect::set(&global("PowerPoint"), &"run".into(), &JsValue::from(1));
+    assert!(g(&global("PowerPoint"), "run").is_function());
+    // `new PowerPoint.RequestContext()` and an explicit sync.
+    let ctor = g(&global("PowerPoint"), "RequestContext").unchecked_into::<Function>();
+    let ctx = Reflect::construct(&ctor, &Array::new()).unwrap();
+    call_js(&slides(&ctx), "add", &[]);
+    let n = call_js(&slides(&ctx), "getCount", &[]);
+    sync(&ctx).await.unwrap();
+    assert_eq!(g(&n, "value").as_f64(), Some(2.0));
+    // `set({...})` follows navigation properties.
+    let out = pp_run(|ctx| async move {
+        let slide = call_js(&slides(&ctx), "getItemAt", &[JsValue::from(0)]);
+        let shape = call_js(&g(&slide, "shapes"), "addTextBox", &[s("Hi")]);
+        call_js(
+            &shape,
+            "set",
+            &[to_js(
+                &json!({"name": "Named", "left": 40, "fill": {"foregroundColor": "#FF0000"}, "textFrame": {"textRange": {"font": {"bold": true}}}}),
+            )],
+        );
+        let set: Function = g(&shape, "set").dyn_into().unwrap();
+        assert!(set.call1(&shape, &JsValue::from(3)).is_err(), "set() takes an object");
+        call_js(&shape, "load", &[s("name, left")]);
+        sync(&ctx).await?;
+        Ok(to_js(&json!([g(&shape, "name").as_string(), g(&shape, "left").as_f64()])))
+    })
+    .await
+    .unwrap();
+    assert_eq!(from_js(&out), json!(["Named", 40]));
+    let sh = deck(|d| d.slides[0].shapes[0].clone());
+    assert_eq!(sh.fill.get("foregroundColor"), Some(&json!("#FF0000")));
+    assert_eq!(sh.font.get("bold"), Some(&json!(true)));
+}
+
+#[wasm_bindgen_test]
+async fn initialize_set_late_is_still_called_and_handlers_answer() {
+    setup();
+    record_events();
+    ready().await;
+    assert!(posted().contains(&json!({"event": "ready"})), "the page says it's ready: {:?}", posted());
+    let office = global("Office");
+    Reflect::set(&office, &"initialize".into(), &recorder("initialize")).unwrap();
+    tick().await;
+    assert_eq!(calls("initialize"), vec![json!("inserted")]);
+    assert!(g(&office, "initialize").is_function());
+    // An event DeckCraft doesn't send fails through the callback, asynchronously; no TypeError.
+    let doc = path(&office, &["context", "document"]);
+    let failed = Promise::new(&mut |resolve, _| {
+        call_js(&doc, "addHandlerAsync", &[s("bindingDataChanged"), recorder("never"), resolve.into()]);
+    });
+    let failed = JsFuture::from(failed).await.unwrap();
+    assert_eq!(g(&failed, "status").as_string().as_deref(), Some("failed"));
+    assert_eq!(path(&failed, &["error", "code"]).as_string().as_deref(), Some("NotSupported"));
+    // DocumentSelectionChanged: the host's events (`__craftOfficeEvent`) reach the handler.
+    let handler = recorder("selection");
+    let added = Promise::new(&mut |resolve, _| {
+        call_js(&doc, "addHandlerAsync", &[s("documentSelectionChanged"), handler.clone(), resolve.into()]);
+    });
+    assert_eq!(g(&JsFuture::from(added).await.unwrap(), "status").as_string().as_deref(), Some("succeeded"));
+    let event: Function = global("__craftOfficeEvent").dyn_into().unwrap();
+    event.call1(&JsValue::UNDEFINED, &s(r#"{"type": "documentSelectionChanged"}"#)).unwrap();
+    event.call1(&JsValue::UNDEFINED, &s(r#"{"type": "somethingElse"}"#)).unwrap();
+    assert_eq!(calls("selection").len(), 1);
+    assert_eq!(calls("selection")[0]["type"], "documentSelectionChanged");
+    let removed = Promise::new(&mut |resolve, _| {
+        call_js(&doc, "removeHandlerAsync", &[s("documentSelectionChanged"), to_js(&json!({})), resolve.into()]);
+    });
+    assert_eq!(g(&JsFuture::from(removed).await.unwrap(), "status").as_string().as_deref(), Some("succeeded"));
+    event.call1(&JsValue::UNDEFINED, &s(r#"{"type": "documentSelectionChanged"}"#)).unwrap();
+    assert_eq!(calls("selection").len(), 1);
+    // The common API's methods DeckCraft lacks fail through their callback, asynchronously.
+    let file = Promise::new(&mut |resolve, _| {
+        call_js(&doc, "getFileAsync", &[s("compressed"), to_js(&json!({"sliceSize": 65536})), resolve.into()]);
+    });
+    assert_eq!(path(&JsFuture::from(file).await.unwrap(), &["error", "code"]).as_string().as_deref(), Some("NotSupported"));
+    let bindings = path(&doc, &["bindings"]);
+    let bound = Promise::new(&mut |resolve, _| {
+        call_js(&bindings, "addFromSelectionAsync", &[s("text"), resolve.into()]);
+    });
+    assert_eq!(path(&JsFuture::from(bound).await.unwrap(), &["error", "code"]).as_string().as_deref(), Some("NotSupported"));
+    // Promise-based APIs reject with NotImplemented.
+    let shown = JsFuture::from(call_js(&path(&office, &["addin"]), "showAsTaskpane", &[]).dyn_into::<Promise>().unwrap()).await.unwrap_err();
+    assert_eq!(code(&shown), "NotImplemented");
+    stop_recording();
+}
+
+#[wasm_bindgen_test]
+async fn function_commands_run_associated_or_global_functions() {
+    setup();
+    record_events();
+    ready().await;
+    // `Office.actions.associate(name, fn)`: fn gets the control id and calls `completed()`.
+    let f = Closure::<dyn Fn(JsValue)>::new(|event: JsValue| {
+        LOG.with(|l| l.borrow_mut().push(json!({"called": "writeValue", "arg": path(&event, &["source", "id"]).as_string()})));
+        call_js(&event, "completed", &[]);
+        call_js(&event, "completed", &[]);
+    })
+    .into_js_value();
+    call_js(&path(&global("Office"), &["actions"]), "associate", &[s("writeValue"), f]);
+    let run: Function = global("__craftOfficeRunFunction").dyn_into().unwrap();
+    run.call1(&JsValue::UNDEFINED, &s(r#"{"call": 7, "name": "writeValue", "control": "Acme.Write"}"#)).unwrap();
+    tick().await;
+    assert_eq!(calls("writeValue"), vec![json!("Acme.Write")]);
+    let done = |call: u64| -> Vec<Json> { posted().into_iter().filter(|e| e["event"] == "functionDone" && e["call"] == call).collect() };
+    assert_eq!(done(7), vec![json!({"event": "functionDone", "call": 7})], "once, though completed() was called twice");
+    // A function file without `associate`: a global function of that name.
+    Reflect::set(&js_sys::global(), &"legacyCommand".into(), &recorder("legacy")).unwrap();
+    run.call1(&JsValue::UNDEFINED, &s(r#"{"call": 8, "name": "legacyCommand", "control": "Acme.Legacy"}"#)).unwrap();
+    tick().await;
+    assert_eq!(calls("legacy")[0]["source"]["id"], "Acme.Legacy");
+    // No such function: the host hears so at once (no time-out wait).
+    run.call1(&JsValue::UNDEFINED, &s(r#"{"call": 9, "name": "missing", "control": "X"}"#)).unwrap();
+    tick().await;
+    assert!(done(9)[0]["error"].is_string());
+    stop_recording();
+}
+
+#[wasm_bindgen_test]
+async fn images_slide_ranges_and_go_to() {
+    setup();
+    ready().await;
+    DECK.with(|d| {
+        let mut d = d.borrow_mut();
+        let id = d.slides[0].id;
+        d.selected_slides = vec![id];
+    });
+    let r = document_async("getSelectedDataAsync", s("slideRange")).await;
+    assert_eq!(g(&r, "status").as_string().as_deref(), Some("succeeded"));
+    assert_eq!(path(&r, &["value", "slides"]).dyn_into::<Array>().unwrap().length(), 1);
+    assert_eq!(
+        path(&r, &["value", "slides"])
+            .dyn_into::<Array>()
+            .unwrap()
+            .get(0)
+            .dyn_into::<js_sys::Object>()
+            .map(|o| from_js(&o)["index"].clone())
+            .unwrap(),
+        json!(1)
+    );
+    // setSelectedDataAsync(base64, {coercionType: Image, imageLeft…}, callback).
+    let doc = path(&global("Office"), &["context", "document"]);
+    let set = Promise::new(&mut |resolve, _| {
+        call_js(
+            &doc,
+            "setSelectedDataAsync",
+            &[s("iVBORw0KGgo="), to_js(&json!({"coercionType": "image", "imageLeft": 10, "imageWidth": 50, "other": 1})), resolve.into()],
+        );
+    });
+    assert_eq!(g(&JsFuture::from(set).await.unwrap(), "status").as_string().as_deref(), Some("succeeded"));
+    let sent = log().into_iter().rev().find(|a| a["method"] == "setSelectedData").unwrap();
+    assert_eq!(sent["args"], json!(["iVBORw0KGgo=", {"coercionType": "image", "imageLeft": 10, "imageWidth": 50}]));
+    let go = Promise::new(&mut |resolve, _| {
+        call_js(&doc, "goToByIdAsync", &[s("next"), s("index"), resolve.into()]);
+    });
+    assert_eq!(g(&JsFuture::from(go).await.unwrap(), "status").as_string().as_deref(), Some("succeeded"));
+    let sent = log().into_iter().rev().find(|a| a["method"] == "goToById").unwrap();
+    assert_eq!(sent["args"], json!(["next", "index"]));
+    // Coercions DeckCraft doesn't take fail through the callback.
+    let html = Promise::new(&mut |resolve, _| {
+        call_js(&doc, "setSelectedDataAsync", &[s("<b>x</b>"), to_js(&json!({"coercionType": "html"})), resolve.into()]);
+    });
+    assert_eq!(g(&JsFuture::from(html).await.unwrap(), "status").as_string().as_deref(), Some("failed"));
 }

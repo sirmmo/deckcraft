@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~20 points and ~120–210 h away
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (progress log: add-ins that require other add-ins; previously minor: live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2; previously minor: ribbon buttons that run macros and Record Macro; previously major: add-ins, Office add-ins and VBA; Ecosystem re-scored; previously major: community PR wave 2026-10-14: ~60 landed items in the progress log, among them the Font, Paragraph, Photo Album, theme colour and font and Date and Time dialogs, presenter and show controls, the SmartArt Text Pane and PPTX corpus slices; breadth 84% after `cargo xtask parity`, ready stays ~55%, stage stays alpha; duplicated rows and headers folded; previous: minor, hours to ~95% per audience added) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** trivial (progress log: Office.js for Microsoft's add-in samples; previously minor: progress log: add-ins that require other add-ins; previously minor: live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2; previously minor: ribbon buttons that run macros and Record Macro; previously major: add-ins, Office add-ins and VBA; Ecosystem re-scored; previously major: community PR wave 2026-10-14: ~60 landed items in the progress log, among them the Font, Paragraph, Photo Album, theme colour and font and Date and Time dialogs, presenter and show controls, the SmartArt Text Pane and PPTX corpus slices; breadth 84% after `cargo xtask parity`, ready stays ~55%, stage stays alpha; duplicated rows and headers folded; previous: minor, hours to ~95% per audience added) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 DeckCraft aims at full PowerPoint parity, and to be better: faster, open (a documented zip+JSON
 format plus PPTX), scriptable by agents (CLI, JSON control channel, MCP), and available everywhere
@@ -219,12 +219,14 @@ app's JSON control channel (`deckcraft --control PORT`).
 | 2026-10-08 | v0.2.0 and v0.3.0 released: Windows arm64, Flatpak aarch64, AppImage zsync updates, branded DMG |
 | 2026-10-07 | v0.1.0 released, signed and notarized; About window with contributor credits (#3); PrintCraft renamed PdfCraft |
 | 2026-10-06 | Renamed SlideCraft to DeckCraft. PPTX import/export, PDF export, media playback with pure-Rust codecs, connectors with glue, freeform tools, merge shapes, AutoRecover, gradient editor, web build, release CI, parity catalogue |
+| 2026-10-15 | Office add-ins run what Microsoft's add-in samples need ([docs/officejs.md](docs/officejs.md)): their `office.js` never runs (blocked before it runs; the API's globals can't be replaced), function commands (ExecuteFunction) call the add-in's function with `event.source.id` and wait for `event.completed()`, colours by CSS name (`"yellow"`), tags on the presentation, slides and shapes, `insertSlidesFromBase64`, pictures and slide ranges through the common API, `goToByIdAsync`, `DocumentSelectionChanged`, `new PowerPoint.RequestContext()`, `set({...})`, and the common API's enumerations |
 | 2026-10-05 | M0: workspace, model, geometry, fonts, text, renderer, engine, MCP, CLI, PowerPoint-style egui UI, slide show engine |
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | trivial | Progress log: Office.js for Microsoft's add-in samples |
 | 2026-10-15 | trivial | Progress log: add-ins that require other add-ins (manifest 1.3) |
 | 2026-10-15 | minor | Progress log: live co-editing (plugin protocol 2) |
 | 2026-10-15 | trivial | Progress log: add-in protocol 1.2 |

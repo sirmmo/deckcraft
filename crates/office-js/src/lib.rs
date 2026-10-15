@@ -2,10 +2,10 @@
 //!
 //! An Office add-in's task pane is a web page that calls `Office.onReady`, `PowerPoint.run` and
 //! the proxy objects (`context.presentation.slides.getItemAt(0).shapes.addTextBox("Hi")`,
-//! `shapes.load("items/name")`, `context.sync()`). DeckCraft never loads Microsoft's `office.js`:
-//! this crate, compiled to wasm, defines those globals itself, written from the public API
-//! reference (PowerPoint JavaScript API, PowerPointApi 1.1–1.5) on learn.microsoft.com (clean
-//! room). Each `context.sync()` sends the queued actions as one JSON batch to the host, which runs
+//! `shapes.load("items/name")`, `context.sync()`). Microsoft's `office.js` never runs in
+//! DeckCraft: this crate, compiled to wasm, defines those globals itself, written from the public
+//! API reference on learn.microsoft.com (clean room). It covers a subset of PowerPointApi 1.1–1.4
+//! (and reports 1.4) plus the selection members of later sets; docs/officejs.md lists it. Each `context.sync()` sends the queued actions as one JSON batch to the host, which runs
 //! it as `office.sync` (one undo step) and answers with the loaded values or an error:
 //!
 //! - request `{"id": n, "actions": [{"op": "load"|"set"|"call", "path": [...], …}]}`, posted

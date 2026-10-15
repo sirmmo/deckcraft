@@ -453,6 +453,8 @@ pub enum UiRequest {
         plugin: String,
         url: String,
         function: String,
+        /// The manifest control that ran it (`event.source.id`).
+        control: String,
     },
 }
 

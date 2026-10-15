@@ -605,9 +605,10 @@ impl SlideApp {
         office_pane::open(self, plugin, title, url, pane);
     }
 
-    /// Calls an Office add-in's function command in its hidden page.
-    pub fn run_office_function(&mut self, plugin: &str, url: &str, function: &str) {
-        office_pane::run_function(self, plugin, url, function);
+    /// Calls an Office add-in's function command in its hidden page (`control`: the manifest
+    /// control that ran it).
+    pub fn run_office_function(&mut self, plugin: &str, url: &str, function: &str, control: &str) {
+        office_pane::run_function(self, plugin, url, function, control);
     }
 
     /// Puts text on the system clipboard (at the end of the frame).
@@ -1353,7 +1354,7 @@ impl SlideApp {
                 UiRequest::Message { text } => self.set_status(text),
                 UiRequest::OpenUrl { url } => self.pending_urls.push(url),
                 UiRequest::OfficePane { plugin, title, url, pane } => self.open_office_pane(&plugin, &title, &url, pane.as_deref()),
-                UiRequest::OfficeFunction { plugin, url, function } => self.run_office_function(&plugin, &url, &function),
+                UiRequest::OfficeFunction { plugin, url, function, control } => self.run_office_function(&plugin, &url, &function, &control),
                 UiRequest::PickFile { purpose } => {
                     if purpose == "saveAs" {
                         self.save_as_dialog("deckcraft");

@@ -1,6 +1,6 @@
 # Add-ins, Office add-ins and macros
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (manifest 1.3: add-ins that require other add-ins, with version ranges; previously minor: protocol 2: the push channel and co-editing transports; previously patch: events refuse `host/sync` and the VBA project, reads too; no-op commands are no edit; previously minor: protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (Office add-ins: what Microsoft's samples need, detailed in [officejs.md](officejs.md); previously minor: manifest 1.3: add-ins that require other add-ins, with version ranges; previously minor: protocol 2: the push channel and co-editing transports; previously patch: events refuse `host/sync` and the VBA project, reads too; no-op commands are no edit; previously minor: protocol 1.2: host-drawn dialogs, opening files, document events, `context.document`; previously minor: ribbon buttons that run macros, saved as the presentation's `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: first version: out-of-process add-ins, Office add-ins' task panes, VBA macros through a macro add-in) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 DeckCraft runs three kinds of extension, all as **add-ins** listed in the Add-ins window (Insert ›
 Add-ins, Developer › Add-ins):
@@ -11,7 +11,8 @@ Add-ins, Developer › Add-ins):
    several apps.
 2. **Office add-ins** (`manifest.xml`): web add-ins written for PowerPoint with the Office
    JavaScript API. Their pages show in a task pane, running **DeckCraft's own Office.js**
-   (`crates/office-js`); Microsoft's `office.js` is never loaded, read or shipped.
+   (`crates/office-js`); Microsoft's `office.js` is never read or shipped, and never runs in the
+   pane. [officejs.md](officejs.md) has the details.
 3. **Macros**: an add-in that declares `"macros": {"language": "VBA"}` (craft-vba,
    [sirmmo/craft-vba](https://github.com/sirmmo/craft-vba)) runs the presentation's VBA. The
    Developer tab appears once one is loaded.
@@ -297,9 +298,12 @@ right-hand panel (`apps/deckcraft/src/office_web.rs`). Before the page's own scr
 the bootstrap (`crates/office-js/bootstrap.js`, the one hand-written script, copied from GridCraft's)
 and DeckCraft's Office.js built to wasm (`cargo xtask office-js`; the macOS package carries it in
 `Resources/office-js`, or set `DECKCRAFT_OFFICE_JS`). Each `context.sync()` becomes one
-`office.sync` command: one undo step, all or nothing.
+`office.sync` command: one undo step, all or nothing. **[officejs.md](officejs.md)** is the full
+reference: the API covered, the bridge, function commands (ExecuteFunction), how Microsoft's
+`office.js` is kept from running, and the limits.
 
-**Objects** (PowerPoint JavaScript API, PowerPointApi 1.1–1.4 subset):
+**Objects** (PowerPoint JavaScript API, PowerPointApi 1.1–1.4 subset; tags, `insertSlidesFromBase64`
+and `set({...})` too, see officejs.md):
 
 | Object | Properties | Methods |
 |---|---|---|
@@ -315,12 +319,16 @@ and DeckCraft's Office.js built to wasm (`cargo xtask office-js`; the macOS pack
 | `ShapeFill` | `type`, `foregroundColor`, `transparency` | `setSolidColor(color)`, `clear()` |
 | `ShapeLineFormat` | `color`, `weight`, `visible`, `dashStyle` | |
 
-The common API: `Office.onReady`, `Office.context.document.getSelectedDataAsync`/`setSelectedDataAsync`
-(text), `settings` (kept per open presentation until it closes), `requirements.isSetSupported`.
+The common API: `Office.onReady`, `Office.initialize`, `Office.actions.associate`,
+`Office.context.document.getSelectedDataAsync`/`setSelectedDataAsync` (text, slide range, image),
+`goToByIdAsync`, `addHandlerAsync` (`DocumentSelectionChanged`), `settings` (kept per open
+presentation until it closes), `requirements.isSetSupported`. Colours are `#RRGGBB` or CSS colour
+names (`"yellow"`).
 A shape added earlier in the same sync is named by that action's result (`getItem({"result": i})`).
 
-Requirement sets reported as supported: **PowerPointApi 1.1–1.4**, and Settings, Selection and
-TextCoercion 1.1; methods: `Document.getSelectedDataAsync`, `Document.setSelectedDataAsync`,
+Requirement sets reported as supported: **PowerPointApi 1.4** (a subset, officejs.md), and
+AddinCommands, DocumentEvents, ImageCoercion, Settings, Selection and TextCoercion 1.1; methods:
+`Document.getSelectedDataAsync`, `Document.setSelectedDataAsync`, `Document.goToByIdAsync`,
 `Settings.get`, `set`, `remove`, `saveAsync`. **Requirements.** The manifest's `<Requirements>`
 are checked when the add-in loads, against that one table (`deckcraft_plugin::office::API_SETS`
 and `API_METHODS`, which `isSetSupported` answers from too; a test keeps them equal). `<Sets>`
@@ -332,8 +340,9 @@ lists `<Set Name="PowerPointApi" MinVersion="1.3"/>`; a set without `MinVersion`
 doesn't support"), and its buttons, menu items and task panes are absent, instead of failing at its
 first call. `plugins.list` reports it as `state: "blocked"` with `blockedBy` (kind `feature`).
 
-**Not yet:** events, dialogs (`displayDialogAsync`), tags, `insertSlidesFromBase64`, hyperlinks,
-settings saved in the file, the unified (JSON) manifest, and a web view on Linux.
+**Not yet:** events other than `DocumentSelectionChanged`, dialogs (`displayDialogAsync`), the
+shared runtime, keyboard shortcuts, hyperlinks, settings saved in the file, the unified (JSON)
+manifest, and a web view on Linux.
 
 ## VBA (craft-vba)
 
@@ -349,6 +358,7 @@ A macro is one undo step; a run-time error takes everything it did back
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Office add-ins: [officejs.md](officejs.md) created; Microsoft's `office.js` never runs, function commands (ExecuteFunction) end to end, colour names, tags and `insertSlidesFromBase64`, image and slide-range coercions, `goToByIdAsync`, `DocumentSelectionChanged`; AddinCommands, DocumentEvents and ImageCoercion 1.1 reported |
 | 2026-10-15 | minor | Manifest 1.3: `requires` (apps, protocol, features, other add-ins with Cargo-style version ranges), blocked add-ins (`state`, `blockedBy`, `requiredBy`), start order, `host.protocol` and `addins` in `initialize`, `plugins.requirements`, `plugins.installMissing`, `plugins.install` `github`/`withRequirements`/`force`/`version` (newest release in range), `plugins.load` `force`, Install Missing, asking before turning off a needed add-in or updating out of range; Office add-ins' requirement sets and methods (PowerPointApi); a command table |
 | 2026-10-15 | minor | Protocol 2: the push channel (add-ins speak any time; `host.features` `push`, `collab`; `host.collab`), manifest `collab` (transports), `collab.join` in command results; co-editing in [collab.md](collab.md) |
 | 2026-10-15 | patch | Aligned with GridCraft and WordCraft: during document events `host/sync` and `host/vbaProject/*` are refused, reads too; a command that changes nothing makes no undo step |

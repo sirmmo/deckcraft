@@ -239,3 +239,183 @@ fn the_selection_and_the_selected_text() {
     results(&mut s, &a, json!([{"op": "call", "path": [{"p": "presentation"}], "method": "setSelectedSlides", "args": [[first]]}]));
     assert_eq!(s.active().unwrap().selection.slide, 0);
 }
+
+/// The first shape on the first slide (a text box added for the test) and its id.
+fn a_text_box(s: &mut Session, a: &Addin) -> (Json, Json) {
+    let shapes = path(json!([{"m": "getItemAt", "a": [0]}, {"p": "shapes"}]));
+    let id = results(
+        s,
+        a,
+        json!([{"op": "call", "path": shapes, "method": "addTextBox", "args": ["Hi", {"left": 10, "top": 10, "width": 200, "height": 50}]}]),
+    )[0]["id"]
+        .clone();
+    (then(&shapes, json!([{"m": "getItem", "a": [id.clone()]}])), id)
+}
+
+#[test]
+fn colours_are_hex_or_css_names_and_read_back_as_hex() {
+    let a = Addin::new("0d5c7a1e-0000-4bcd-9eaf-000000000006", "ReadWriteDocument");
+    let mut s = Session::with_new();
+    let (shape, _) = a_text_box(&mut s, &a);
+    let fill = then(&shape, json!([{"p": "fill"}]));
+    let line = then(&shape, json!([{"p": "lineFormat"}]));
+    let font = then(&shape, json!([{"p": "textFrame"}, {"p": "textRange"}, {"p": "font"}]));
+    let r = results(
+        &mut s,
+        &a,
+        json!([
+            {"op": "set", "path": fill, "prop": "foregroundColor", "value": "yellow"},
+            {"op": "set", "path": font, "prop": "color", "value": "Blue"},
+            {"op": "set", "path": line, "prop": "color", "value": " DarkSlateGray "},
+            {"op": "load", "path": fill, "props": ["foregroundColor"]},
+            {"op": "load", "path": font, "props": ["color"]},
+            {"op": "load", "path": line, "props": ["color"]},
+        ]),
+    );
+    assert_eq!((&r[3]["foregroundColor"], &r[4]["color"], &r[5]["color"]), (&json!("#FFFF00"), &json!("#0000FF"), &json!("#2F4F4F")));
+    results(
+        &mut s,
+        &a,
+        json!([{"op": "call", "path": fill, "method": "setSolidColor", "args": ["rebeccapurple"]}, {"op": "set", "path": font, "prop": "color", "value": "#00ff7f"}]),
+    );
+    let r =
+        results(&mut s, &a, json!([{"op": "load", "path": fill, "props": ["foregroundColor"]}, {"op": "load", "path": font, "props": ["color"]}]));
+    assert_eq!((&r[0]["foregroundColor"], &r[1]["color"]), (&json!("#663399"), &json!("#00FF7F")));
+    // A colour that is neither fails the whole sync, saying which action.
+    let r = sync(
+        &mut s,
+        &a,
+        json!([{"op": "set", "path": fill, "prop": "foregroundColor", "value": "red"}, {"op": "set", "path": font, "prop": "color", "value": "blurple"}]),
+    );
+    assert_eq!((r["error"]["code"].as_str(), r["error"]["action"].as_u64()), (Some("InvalidArgument"), Some(1)), "{r}");
+    let r = results(&mut s, &a, json!([{"op": "load", "path": fill, "props": ["foregroundColor"]}]));
+    assert_eq!(r[0]["foregroundColor"], "#663399", "the batch was taken back");
+}
+
+#[test]
+fn tags_on_the_presentation_slides_and_shapes() {
+    let a = Addin::new("0d5c7a1e-0000-4bcd-9eaf-000000000007", "ReadWriteDocument");
+    let mut s = Session::with_new();
+    let (shape, shape_id) = a_text_box(&mut s, &a);
+    for owner in [json!([{"p": "presentation"}]), path(json!([{"m": "getItemAt", "a": [0]}])), shape.clone()] {
+        let tags = then(&owner, json!([{"p": "tags"}]));
+        let r = results(
+            &mut s,
+            &a,
+            json!([
+                {"op": "call", "path": tags, "method": "add", "args": ["customer", "Contoso"]},
+                {"op": "call", "path": tags, "method": "add", "args": ["Region", "North"]},
+                {"op": "call", "path": tags, "method": "add", "args": ["CUSTOMER", "Fabrikam"]},
+                {"op": "load", "path": tags, "props": ["items", "key", "value"]},
+                {"op": "load", "path": then(&tags, json!([{"m": "getItem", "a": ["region"]}])), "props": ["key", "value"]},
+                {"op": "set", "path": then(&tags, json!([{"m": "getItemAt", "a": [1]}])), "prop": "value", "value": "South"},
+                {"op": "call", "path": tags, "method": "delete", "args": ["customer"]},
+                {"op": "load", "path": tags, "props": ["count", "items"]},
+            ]),
+        );
+        assert_eq!(
+            r[3]["items"],
+            json!([{"key": "CUSTOMER", "value": "Fabrikam"}, {"key": "REGION", "value": "North"}]),
+            "keys are upper case, add replaces"
+        );
+        assert_eq!(r[4], json!({"key": "REGION", "value": "North"}));
+        assert_eq!(r[7]["items"], json!([{"key": "REGION", "value": "South"}]));
+        let r = sync(&mut s, &a, json!([{"op": "load", "path": then(&tags, json!([{"m": "getItem", "a": ["missing"]}])), "props": ["value"]}]));
+        assert_eq!(r["error"]["code"], "ItemNotFound");
+        let r = sync(&mut s, &a, json!([{"op": "call", "path": tags, "method": "add", "args": ["", "x"]}]));
+        assert_eq!(r["error"]["code"], "InvalidArgument");
+    }
+    // Kept in the model, which saves them (`p:custDataLst`).
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.tags, vec![("REGION".to_string(), "South".to_string())]);
+    let sid = shape_id.as_str().unwrap().parse::<u32>().unwrap();
+    assert_eq!(d.doc.slides[0].shape(deckcraft_model::ShapeId(sid)).unwrap().tags.len(), 1);
+}
+
+#[test]
+fn slides_inserted_from_base64_by_id_after_a_target() {
+    let a = Addin::new("0d5c7a1e-0000-4bcd-9eaf-000000000008", "ReadWriteDocument");
+    // A three-slide source, exported as PowerPoint would hand it over.
+    let mut src = Session::with_new();
+    for t in ["Two", "Three"] {
+        src.execute("slide.new", &json!({"title": t})).unwrap();
+    }
+    let bytes = deckcraft_pptx::export(&src.active().unwrap().doc).unwrap();
+    let source = crate::cmd::file::open_presentation("src.pptx", &bytes).unwrap();
+    let wanted: Vec<String> = source.slides.iter().skip(1).map(|sl| format!("{}#", sl.id.0)).collect();
+    let b64 = crate::cmd::base64_encode(&bytes);
+    let mut s = Session::with_new();
+    s.execute("slide.new", &json!({})).unwrap();
+    let first = s.active().unwrap().doc.slides[0].id.0;
+    let undo = s.active().unwrap().history.undo.len();
+    results(
+        &mut s,
+        &a,
+        json!([{"op": "call", "path": [{"p": "presentation"}], "method": "insertSlidesFromBase64",
+            "args": [b64, {"formatting": "KeepSourceFormatting", "sourceSlideIds": wanted, "targetSlideId": format!("{first}#")}]}]),
+    );
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.slides.len(), 4, "two inserted");
+    assert_eq!(d.doc.slides[0].id.0, first);
+    let titles: Vec<String> = d.doc.slides.iter().map(|sl| sl.title()).collect();
+    assert_eq!(titles.get(1..3), Some(&["Two".to_string(), "Three".to_string()][..]), "{titles:?}");
+    assert_eq!(d.history.undo.len(), undo + 1, "one undo step");
+    let r = sync(
+        &mut s,
+        &a,
+        json!([{"op": "call", "path": [{"p": "presentation"}], "method": "insertSlidesFromBase64", "args": [b64, {"sourceSlideIds": ["999999#"]}]}]),
+    );
+    assert_eq!(r["error"]["code"], "ItemNotFound", "{r}");
+    let r = sync(&mut s, &a, json!([{"op": "call", "path": [{"p": "presentation"}], "method": "insertSlidesFromBase64", "args": ["not base64!"]}]));
+    assert!(r["error"]["code"].is_string(), "{r}");
+}
+
+#[test]
+fn image_and_slide_range_coercions_and_go_to() {
+    let a = Addin::new("0d5c7a1e-0000-4bcd-9eaf-000000000009", "ReadWriteDocument");
+    let mut s = Session::with_new();
+    for _ in 0..2 {
+        s.execute("slide.new", &json!({})).unwrap();
+    }
+    let doc = json!([{"p": "document"}]);
+    let go = |s: &mut Session, id: Json, kind: &str| sync(s, &a, json!([{"op": "call", "path": doc, "method": "goToById", "args": [id, kind]}]));
+    assert!(go(&mut s, json!("first"), "index").get("error").is_none());
+    assert_eq!(s.active().unwrap().selection.slide, 0);
+    go(&mut s, json!("next"), "index");
+    go(&mut s, json!("next"), "index");
+    go(&mut s, json!("next"), "index");
+    assert_eq!(s.active().unwrap().selection.slide, 2, "next stops at the last");
+    go(&mut s, json!("previous"), "index");
+    assert_eq!(s.active().unwrap().selection.slide, 1);
+    go(&mut s, json!(3), "index");
+    assert_eq!(s.active().unwrap().selection.slide, 2, "slide numbers count from 1");
+    let id = s.active().unwrap().doc.slides[0].id.0;
+    go(&mut s, json!(id), "slide");
+    assert_eq!(s.active().unwrap().selection.slide, 0);
+    assert_eq!(go(&mut s, json!(9), "index")["error"]["code"], "ItemNotFound");
+    assert_eq!(go(&mut s, json!("x"), "namedItem")["error"]["code"], "NotSupported");
+    // The selected slides as a SlideRange: ids as numbers, indexes from 1.
+    let r = results(&mut s, &a, json!([{"op": "call", "path": doc, "method": "getSelectedData", "args": ["slideRange"]}]));
+    assert_eq!(r[0], json!({"slides": [{"id": id, "title": "", "index": 1}]}));
+    let r = sync(&mut s, &a, json!([{"op": "call", "path": doc, "method": "getSelectedData", "args": ["html"]}]));
+    assert_eq!(r["error"]["code"], "NotSupported");
+    // An image: a picture on the current slide, where asked, keeping its aspect.
+    let png = crate::cmd::base64_encode(&[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8, 8, 2, 0, 0, 0, 75, 109, 41, 220, 0, 0, 0, 17, 73, 68,
+        65, 84, 120, 156, 99, 184, 163, 161, 129, 21, 49, 12, 45, 9, 0, 123, 123, 75, 1, 251, 162, 81, 240, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+        130,
+    ]);
+    let before = s.active().unwrap().doc.slides[0].shapes.len();
+    results(
+        &mut s,
+        &a,
+        json!([{"op": "call", "path": doc, "method": "setSelectedData", "args": [png, {"coercionType": "image", "imageLeft": 20, "imageTop": 30, "imageWidth": 100}]}]),
+    );
+    let d = s.active().unwrap();
+    let pic = d.doc.slides[0].shapes.get(before).expect("a picture was added");
+    assert!(matches!(pic.kind, deckcraft_model::ShapeKind::Picture { .. }));
+    let x = pic.xfrm.unwrap();
+    assert_eq!((x.x, x.y, x.w, x.h), (20.0, 30.0, 100.0, 100.0), "an 8×8 picture stays square");
+    let r = sync(&mut s, &a, json!([{"op": "call", "path": doc, "method": "setSelectedData", "args": ["AAAA", {"coercionType": "image"}]}]));
+    assert!(r["error"]["code"].is_string(), "not a picture: {r}");
+}

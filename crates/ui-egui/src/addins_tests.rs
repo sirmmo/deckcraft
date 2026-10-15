@@ -181,6 +181,9 @@ struct Web {
     inbox: Vec<(String, String)>,
     replies: Vec<(String, String)>,
     hidden: Vec<String>,
+    hidden_pages: Vec<(String, String)>,
+    /// (page, entry point, argument).
+    calls: Vec<(String, String, String)>,
 }
 
 impl OfficeHost for FakeWeb {
@@ -194,7 +197,15 @@ impl OfficeHost for FakeWeb {
         self.0.lock().unwrap().hidden.push(key.into());
     }
     fn close(&mut self, _key: &str) {}
-    fn run_function(&mut self, _key: &str, _url: &str, _function: &str) {}
+    fn load_hidden(&mut self, key: &str, url: &str) {
+        let mut w = self.0.lock().unwrap();
+        if !w.hidden_pages.iter().any(|(k, _)| k == key) {
+            w.hidden_pages.push((key.into(), url.into()));
+        }
+    }
+    fn call(&mut self, key: &str, entry: &str, json: &str) {
+        self.0.lock().unwrap().calls.push((key.into(), entry.into(), json.into()));
+    }
     fn take_messages(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.0.lock().unwrap().inbox)
     }
@@ -467,4 +478,99 @@ fn blocked_add_ins_say_why_and_offer_to_install_what_they_need() {
     h.run_steps(3);
     assert!(!deckcraft_engine::plugin::get("t.ui-vba").unwrap().enabled());
     assert!(!deckcraft_engine::plugin::get("t.ui-reports").unwrap().enabled());
+}
+
+/// The `__craftOfficeRunFunction` calls made so far, as JSON.
+fn run_calls(web: &FakeWeb) -> Vec<(String, Json)> {
+    web.0
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .filter(|(_, e, _)| e == "__craftOfficeRunFunction")
+        .map(|(k, _, j)| (k.clone(), serde_json::from_str(j).unwrap()))
+        .collect()
+}
+
+#[test]
+fn an_office_add_ins_function_command_runs_in_its_hidden_page() {
+    let _one_at_a_time = ADDINS.lock().unwrap_or_else(|e| e.into_inner());
+    let manifest = r#"<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="TaskPaneApp">
+  <Id>0d5c7a1e-0000-4bcd-9eaf-0000000000ab</Id><Version>1.0.0.0</Version><ProviderName>Tests</ProviderName><DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Function Test"/><Description DefaultValue="Tests"/>
+  <Hosts><Host Name="Presentation"/></Hosts>
+  <DefaultSettings><SourceLocation DefaultValue="https://tests.example/pane.html"/></DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts><Host xsi:type="Presentation"><DesktopFormFactor>
+      <FunctionFile resid="Commands.Url"/>
+      <ExtensionPoint xsi:type="PrimaryCommandSurface"><OfficeTab id="TabHome"><Group id="T.Group"><Label resid="L"/>
+        <Control xsi:type="Button" id="Tests.Write"><Label resid="L"/><Action xsi:type="ExecuteFunction"><FunctionName>writeValue</FunctionName></Action></Control>
+      </Group></OfficeTab></ExtensionPoint>
+    </DesktopFormFactor></Host></Hosts>
+    <Resources>
+      <bt:Urls><bt:Url id="Commands.Url" DefaultValue="https://tests.example/commands.html"/></bt:Urls>
+      <bt:ShortStrings><bt:String id="L" DefaultValue="Write"/></bt:ShortStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>"#;
+    let m = deckcraft_engine::plugin::office::parse_manifest(manifest, deckcraft_engine::plugin::HOST_ID).unwrap();
+    let id = m.id.clone();
+    let command = m.office.as_ref().unwrap().commands.keys().next().cloned().unwrap();
+    deckcraft_engine::plugin::install(m, std::env::temp_dir()).unwrap();
+    struct UnloadId(String);
+    impl Drop for UnloadId {
+        fn drop(&mut self) {
+            deckcraft_engine::plugin::unload(&self.0);
+        }
+    }
+    let _unload = UnloadId(id.clone());
+    let web = FakeWeb::default();
+    let services = Services { office: Some(Box::new(web.clone())), ..Default::default() };
+    let mut h = harness(Session::with_new(), services);
+    // Clicked twice before the page has loaded: the page is loaded once, nothing is called yet.
+    for _ in 0..2 {
+        h.state_mut().run("plugins.run", json!({"plugin": id, "command": command})).unwrap();
+        h.run_steps(2);
+    }
+    let pages = web.0.lock().unwrap().hidden_pages.clone();
+    assert_eq!(pages.len(), 1);
+    let (key, url) = pages[0].clone();
+    assert_eq!(url, "https://tests.example/commands.html");
+    assert!(run_calls(&web).is_empty(), "not before the page is ready");
+    // The page is ready: both calls, with the manifest's control id.
+    web.0.lock().unwrap().inbox.push((key.clone(), json!({"event": "ready"}).to_string()));
+    h.run_steps(2);
+    let calls = run_calls(&web);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        (calls[0].0.as_str(), calls[0].1["name"].as_str(), calls[0].1["control"].as_str()),
+        (key.as_str(), Some("writeValue"), Some("Tests.Write"))
+    );
+    assert_eq!(h.state().office.calls.len(), 2);
+    // functionDone ends a call; one with an error says so in the status bar. Events are never
+    // answered as syncs.
+    web.0.lock().unwrap().inbox.push((key.clone(), json!({"event": "functionDone", "call": calls[0].1["call"]}).to_string()));
+    web.0.lock().unwrap().inbox.push((key.clone(), json!({"event": "functionDone", "call": calls[1].1["call"], "error": "no cell"}).to_string()));
+    h.run_steps(2);
+    assert!(h.state().office.calls.is_empty());
+    let said = h.state().status.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.contains("writeValue") && said.contains("no cell"), "{said}");
+    assert!(web.0.lock().unwrap().replies.is_empty());
+    // A call that never completes is given up on after the time-out.
+    h.state_mut().run("plugins.run", json!({"plugin": id, "command": command})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().office.calls.len(), 1);
+    let now = crate::now_ms() + crate::office_pane::FUNCTION_TIMEOUT_MS + 1.0;
+    crate::office_pane::expire_calls(h.state_mut(), now);
+    assert!(h.state().office.calls.is_empty());
+    let said = h.state().status.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.contains("Function Test") && said.contains("didn't finish"), "{said}");
+    // The selection changing is told to the ready pages.
+    web.0.lock().unwrap().calls.clear();
+    h.state_mut().run("slide.new", json!({})).unwrap();
+    h.run_steps(2);
+    let events: Vec<(String, String, String)> = web.0.lock().unwrap().calls.iter().filter(|(_, e, _)| e == "__craftOfficeEvent").cloned().collect();
+    assert_eq!(events, vec![(key.clone(), "__craftOfficeEvent".to_string(), json!({"type": "documentSelectionChanged"}).to_string())]);
 }

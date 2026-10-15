@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (add-ins that require other add-ins, manifest 1.3; previously minor: live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2: dialogs, opening files, document events; previously minor: ribbon buttons that run macros, saved as `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (Office.js: what Microsoft's samples need; previously minor: add-ins that require other add-ins, manifest 1.3; previously minor: live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2: dialogs, opening files, document events; previously minor: ribbon buttons that run macros, saved as `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -348,9 +348,13 @@ Detail in [localization-parity.md](localization-parity.md).
   require other add-ins with Cargo-style version ranges, app versions, protocol and features;
   unmet ones are blocked with the reason, installing the missing ones from their newest GitHub
   release in range (Install Missing); Office add-ins' requirement sets are checked
-  ([plugins.md](plugins.md#requirements-manifest-13)). The owner reversed
+  ([plugins.md](plugins.md#requirements-manifest-13)). Office.js runs Microsoft's add-in samples'
+  common needs ([officejs.md](officejs.md)): their `office.js` never runs, function commands
+  (ExecuteFunction), colour names, tags, `insertSlidesFromBase64`, image and slide-range
+  coercions, `goToByIdAsync`, `DocumentSelectionChanged`. The owner reversed
   the earlier "out of scope" policy on 2026-10-14 ([plugins.md](plugins.md)). Missing: Office.js
-  events, dialogs, tags and `insertSlidesFromBase64`; a Linux web view; editing a ribbon richer
+  dialogs, the shared runtime and keyboard shortcuts, other events, hyperlinks and tables through
+  the object model, settings saved in the file, the unified JSON manifest; a Linux web view; editing a ribbon richer
   than tabs, groups and buttons; VBA's UserForms, events and partial-text formatting; updating
   installed add-ins (no update check) and more than one page (100) of a repository's releases.
   12–25 h.
@@ -379,6 +383,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Add-ins entry: Office.js closes the gaps Microsoft's samples hit (office.js blocking, ExecuteFunction, colour names, tags, `insertSlidesFromBase64`, coercions, `goToByIdAsync`, selection events); the missing list updated |
 | 2026-10-15 | minor | Add-ins entry: manifest 1.3 (add-ins require other add-ins: version ranges, blocked add-ins with reasons, start order, Install Missing from the newest release in range; Office add-ins' requirement sets checked) |
 | 2026-10-15 | minor | Live co-editing (plugin protocol 2): new Ecosystem entry; the add-ins entry mentions it |
 | 2026-10-15 | minor | Add-in protocol 1.2 (dialogs, opening files, document events) |

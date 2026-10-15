@@ -29,11 +29,26 @@ const MAX_URL: usize = 2048;
 /// The requirement sets DeckCraft's Office.js library (`crates/office-js`) supports, with the
 /// highest version of each: an add-in whose `<Requirements>` ask for more is blocked. The
 /// library's `isSetSupported` answers from the same table (a test there keeps them equal).
-pub const API_SETS: &[(&str, (u64, u64))] = &[("PowerPointApi", (1, 4)), ("Settings", (1, 1)), ("Selection", (1, 1)), ("TextCoercion", (1, 1))];
+pub const API_SETS: &[(&str, (u64, u64))] = &[
+    ("PowerPointApi", (1, 4)),
+    ("Settings", (1, 1)),
+    ("Selection", (1, 1)),
+    ("TextCoercion", (1, 1)),
+    ("ImageCoercion", (1, 1)),
+    ("DocumentEvents", (1, 1)),
+    ("AddinCommands", (1, 1)),
+];
 
 /// The Common API methods the library implements (`<Requirements><Methods>`).
-pub const API_METHODS: &[&str] =
-    &["Document.getSelectedDataAsync", "Document.setSelectedDataAsync", "Settings.get", "Settings.set", "Settings.remove", "Settings.saveAsync"];
+pub const API_METHODS: &[&str] = &[
+    "Document.getSelectedDataAsync",
+    "Document.setSelectedDataAsync",
+    "Document.goToByIdAsync",
+    "Settings.get",
+    "Settings.set",
+    "Settings.remove",
+    "Settings.saveAsync",
+];
 
 /// Most requirement sets and methods kept from a manifest.
 const MAX_REQUIREMENTS: usize = 200;
@@ -82,7 +97,13 @@ pub enum OfficeCommand {
         taskpane_id: Option<String>,
     },
     /// Calls a function of the add-in's function file (a page without a pane).
-    ExecuteFunction { function: String, url: String },
+    ExecuteFunction {
+        function: String,
+        url: String,
+        /// The control's id in the manifest (`<Control id="…">`): the function's `event.source.id`.
+        #[serde(default)]
+        control: String,
+    },
 }
 
 /// What DeckCraft keeps of an add-in manifest beyond the plugin manifest.
@@ -453,7 +474,8 @@ fn controls(
                 if function.is_empty() {
                     continue;
                 }
-                OfficeCommand::ExecuteFunction { function, url: function_file.to_string() }
+                let control = c.attr("id").unwrap_or_default().chars().take(200).collect();
+                OfficeCommand::ExecuteFunction { function, url: function_file.to_string(), control }
             }
             _ => continue,
         };

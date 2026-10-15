@@ -327,19 +327,87 @@ pub fn enum_from_wire(v: &Json) -> Json {
 /// The requirement sets reported as supported, with the highest version. The plugin host checks
 /// Office add-ins' `<Requirements>` against the same table (`deckcraft_plugin::office::API_SETS`;
 /// a test keeps them equal).
-pub const REQUIREMENT_SETS: &[(&str, (u32, u32))] =
-    &[("PowerPointApi", (1, 4)), ("Settings", (1, 1)), ("Selection", (1, 1)), ("TextCoercion", (1, 1))];
+pub const REQUIREMENT_SETS: &[(&str, (u32, u32))] = &[
+    ("PowerPointApi", (1, 4)),
+    ("Settings", (1, 1)),
+    ("Selection", (1, 1)),
+    ("TextCoercion", (1, 1)),
+    ("ImageCoercion", (1, 1)),
+    ("DocumentEvents", (1, 1)),
+    ("AddinCommands", (1, 1)),
+];
 
 /// The Common API methods this library implements (`<Requirements><Methods>`), as the plugin
 /// host checks them (`deckcraft_plugin::office::API_METHODS`).
-pub const SUPPORTED_METHODS: &[&str] =
-    &["Document.getSelectedDataAsync", "Document.setSelectedDataAsync", "Settings.get", "Settings.set", "Settings.remove", "Settings.saveAsync"];
+pub const SUPPORTED_METHODS: &[&str] = &[
+    "Document.getSelectedDataAsync",
+    "Document.setSelectedDataAsync",
+    "Document.goToByIdAsync",
+    "Settings.get",
+    "Settings.set",
+    "Settings.remove",
+    "Settings.saveAsync",
+];
 
 /// `Office.context.requirements.isSetSupported(name, minVersion)`.
 pub fn is_set_supported(name: &str, min: Option<&str>) -> bool {
     let Some((_, have)) = REQUIREMENT_SETS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) else { return false };
     let want = min.map(version).unwrap_or((1, 1));
     want <= *have
+}
+
+/// A function command the host runs (`__craftOfficeRunFunction({"call", "name", "control"})`):
+/// the host's number for the call, the function's name and the manifest control that ran it
+/// (`event.source.id`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionCall {
+    pub call: Json,
+    pub name: String,
+    pub control: String,
+}
+
+impl FunctionCall {
+    /// Reads the host's `{"call", "name", "control"}`; `None` without a usable name.
+    pub fn parse(text: &str) -> Option<FunctionCall> {
+        let v: Json = serde_json::from_str(text).ok()?;
+        let name = v.get("name").and_then(Json::as_str).map(str::trim).filter(|n| !n.is_empty() && n.len() <= 256)?.to_string();
+        let control = v.get("control").and_then(Json::as_str).unwrap_or_default().chars().take(256).collect();
+        Some(FunctionCall { call: v.get("call").cloned().unwrap_or(Json::Null), name, control })
+    }
+
+    /// The event telling the host the call is over (`event.completed()`), or what went wrong.
+    pub fn done(&self, error: Option<&str>) -> Json {
+        let mut m = json!({"event": "functionDone", "call": self.call});
+        if let Some(e) = error {
+            m["error"] = json!(e.chars().take(500).collect::<String>());
+        }
+        m
+    }
+}
+
+/// `set({...})`'s properties as (navigation steps, property, value): an object under a
+/// navigation property (`is_nav`) is followed (`{font: {bold: true}}` → `(["font"], "bold",
+/// true)`); anything else is a value. At most 16 levels and 1 000 properties.
+pub fn flatten_set(value: &Json, is_nav: impl Fn(&str) -> bool) -> Result<Vec<(Vec<String>, String, Json)>, OfficeError> {
+    fn walk(v: &Json, at: &mut Vec<String>, is_nav: &dyn Fn(&str) -> bool, out: &mut Vec<(Vec<String>, String, Json)>) -> Result<(), OfficeError> {
+        let Json::Object(o) = v else { return Err(OfficeError::new("InvalidArgument", "set() takes an object of properties")) };
+        if at.len() > 16 || out.len() > 1000 {
+            return Err(OfficeError::new("InvalidArgument", "set() takes at most 16 levels and 1000 properties"));
+        }
+        for (k, v) in o {
+            if v.is_object() && is_nav(k) {
+                at.push(k.clone());
+                walk(v, at, is_nav, out)?;
+                at.pop();
+            } else {
+                out.push((at.clone(), k.clone(), v.clone()));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(value, &mut Vec::new(), &is_nav, &mut out)?;
+    Ok(out)
 }
 
 fn version(v: &str) -> (u32, u32) {
@@ -460,7 +528,54 @@ mod tests {
         assert!(is_set_supported("PowerPointApi", Some("1.4")) && is_set_supported("powerpointapi", Some("1.1")));
         assert!(is_set_supported("PowerPointApi", None) && is_set_supported("TextCoercion", Some("1.1")));
         assert!(!is_set_supported("PowerPointApi", Some("1.5")) && !is_set_supported("PowerPointApi", Some("1.10")));
+        assert!(
+            is_set_supported("ImageCoercion", None)
+                && is_set_supported("DocumentEvents", Some("1.1"))
+                && is_set_supported("AddinCommands", Some("1.1"))
+        );
+        assert!(!is_set_supported("AddinCommands", Some("1.3")) && !is_set_supported("DialogApi", None));
         assert!(!is_set_supported("ExcelApi", Some("1.1")) && !is_set_supported("MatrixCoercion", None));
         assert_eq!(id_string(&json!(257)), Some("257".into()));
+    }
+
+    #[test]
+    fn function_calls_are_read_and_answered() {
+        let c = FunctionCall::parse(r#"{"call": 3, "name": "writeValue", "control": "Contoso.FunctionButton"}"#).unwrap();
+        assert_eq!(c, FunctionCall { call: json!(3), name: "writeValue".into(), control: "Contoso.FunctionButton".into() });
+        assert_eq!(c.done(None), json!({"event": "functionDone", "call": 3}));
+        assert_eq!(c.done(Some("no")), json!({"event": "functionDone", "call": 3, "error": "no"}));
+        let bare = FunctionCall::parse(r#"{"name": " toggle "}"#).unwrap();
+        assert_eq!((bare.name.as_str(), bare.control.as_str(), &bare.call), ("toggle", "", &Json::Null));
+        for bad in ["", "toggle", r#"{"control": "x"}"#, r#"{"name": ""}"#, &format!(r#"{{"name": "{}"}}"#, "f".repeat(300))] {
+            assert!(FunctionCall::parse(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn set_follows_navigation_properties() {
+        let nav = |k: &str| matches!(k, "font" | "fill" | "textFrame" | "textRange");
+        let mut got = flatten_set(
+            &json!({"name": "A", "fill": {"foregroundColor": "red"}, "textFrame": {"textRange": {"font": {"bold": true}}}, "left": 5}),
+            nav,
+        )
+        .unwrap();
+        got.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(
+            got,
+            vec![
+                (vec!["textFrame".to_string(), "textRange".to_string(), "font".to_string()], "bold".to_string(), json!(true)),
+                (vec!["fill".to_string()], "foregroundColor".to_string(), json!("red")),
+                (vec![], "left".to_string(), json!(5)),
+                (vec![], "name".to_string(), json!("A")),
+            ]
+        );
+        // An object under a property that isn't a navigation property is a value.
+        assert_eq!(flatten_set(&json!({"tag": {"a": 1}}), nav).unwrap(), vec![(vec![], "tag".to_string(), json!({"a": 1}))]);
+        assert!(flatten_set(&json!(5), nav).is_err());
+        let mut deep = json!({"bold": true});
+        for _ in 0..40 {
+            deep = json!({"font": deep});
+        }
+        assert!(flatten_set(&deep, nav).is_err());
     }
 }
