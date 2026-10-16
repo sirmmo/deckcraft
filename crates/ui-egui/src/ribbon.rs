@@ -85,6 +85,20 @@ pub fn title_bar(app: &mut SlideApp, ui: &mut Ui) {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         right.spacing_mut().item_spacing.x = 6.0;
+        // Embedded in a page that keeps the file (craft-live in Nextcloud): Close at the right end,
+        // since the page shows no close button of its own.
+        if let Some(host) = app.embed.as_ref().map(|e| e.host.clone()) {
+            let close = right.add(
+                egui::Button::new(egui::RichText::new("Close").font(theme::font(13.0)))
+                    .corner_radius(control_h / 2.0)
+                    .min_size(vec2(64.0, control_h)),
+            );
+            if close.on_hover_text(format!("Close the presentation and go back to {host}")).clicked()
+                && let Some(e) = app.embed.as_mut()
+            {
+                e.close_requested = true;
+            }
+        }
         // Share at the right end, the people in the live session beside it.
         if has_doc {
             crate::collab_ui::title_bar(app, &mut right, control_h);

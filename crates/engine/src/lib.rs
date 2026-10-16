@@ -23,6 +23,7 @@ pub mod inkshape;
 pub mod io;
 pub mod keys;
 pub mod links;
+pub mod live;
 pub mod media_refs;
 pub mod recovery;
 pub mod sample;

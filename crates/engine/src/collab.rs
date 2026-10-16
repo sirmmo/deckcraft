@@ -1271,8 +1271,9 @@ fn handle(s: &mut Session, p: Pushed) -> bool {
     }
 }
 
-/// `collab/snapshot`: the room's whole state, and the presentation as `.pptx` when asked (not in
-/// an encrypted room: the transport would see the content).
+/// `collab/snapshot`: the room's whole state, and the presentation's file when asked (`file:
+/// true`; in the `format` given when DeckCraft writes it, else `.pptx`; not in an encrypted room:
+/// the transport would see the content).
 fn snapshot(s: &mut Session, plugin: &str, params: &Json) -> std::result::Result<Json, deckcraft_plugin::HostError> {
     let err = |m: String| deckcraft_plugin::HostError { code: -32000, message: m, data: Json::Null };
     let room = params.get("room").and_then(Json::as_str).ok_or_else(|| err("missing `room`".into()))?.to_string();
@@ -1291,13 +1292,19 @@ fn snapshot(s: &mut Session, plugin: &str, params: &Json) -> std::result::Result
             if r.key.is_some() {
                 o.insert("fileRefused".into(), json!("the room is encrypted: the presentation stays with the people in it"));
             } else if let Some(d) = s.docs.iter().find(|d| d.uid == r.doc) {
+                // The `format` hint (craft-live's nextcloud-live: the file's own extension) when
+                // DeckCraft writes it; `.pptx` otherwise, and the transport keeps it as a copy.
+                let asked = params.get("format").and_then(Json::as_str).unwrap_or("pptx");
+                let (fmt, _) = crate::live::save_target(asked, "");
                 let name = {
                     let t = d.title();
-                    if t.to_ascii_lowercase().ends_with(".pptx") { t } else { format!("{t}.pptx") }
+                    let ext = format!(".{fmt}");
+                    if t.to_ascii_lowercase().ends_with(&ext) { t } else { format!("{t}{ext}") }
                 };
-                let bytes = crate::cmd::file::save_bytes(&d.doc, "pptx").map_err(|e| err(e.to_string()))?;
+                let bytes = crate::cmd::file::save_bytes(&d.doc, fmt).map_err(|e| err(e.to_string()))?;
                 o.insert("file".into(), json!(deckcraft_collab::b64_encode(&bytes)));
                 o.insert("name".into(), json!(name));
+                o.insert("format".into(), json!(fmt));
             }
         }
         Ok(out)

@@ -377,6 +377,7 @@ fn popover(app: &mut SlideApp, ctx: &egui::Context) {
         (room.room.clone(), room.plugin.clone(), room.link.clone(), room.encrypted(), room.message.clone());
     let state = state_label(app).unwrap_or_default();
     let people = people(app);
+    let embed_host = app.embed.as_ref().map(|e| e.host.clone());
     let mut leave = false;
     let mut jump = None;
     let mut copy = None;
@@ -424,7 +425,12 @@ fn popover(app: &mut SlideApp, ctx: &egui::Context) {
                     {
                         copy = Some(l.clone());
                     }
-                    if ui.button("Leave").on_hover_text("The presentation stays open here with every edit").clicked() {
+                    // Embedded (craft-live): leaving the room is closing the editor.
+                    let (label, tip) = match &embed_host {
+                        Some(host) => ("Close", format!("Close the presentation and go back to {host}")),
+                        None => ("Leave", "The presentation stays open here with every edit".to_string()),
+                    };
+                    if ui.button(label).on_hover_text(tip).clicked() {
                         leave = true;
                     }
                 });
@@ -442,7 +448,12 @@ fn popover(app: &mut SlideApp, ctx: &egui::Context) {
         app.collab.popover = false;
     }
     if leave {
-        let _ = app.run("collab.leave", json!({}));
+        match app.embed.as_mut() {
+            Some(e) => e.close_requested = true,
+            None => {
+                let _ = app.run("collab.leave", json!({}));
+            }
+        }
         app.collab.popover = false;
     }
     if clicked_out || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

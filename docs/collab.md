@@ -1,6 +1,6 @@
 # Live sessions (co-editing)
 
-> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (document chat: the Chat pane, saved in the file, live in a session; previously major: created: plugin protocol 2 in DeckCraft, schema 1, Share in the title bar) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** major (the web build edits live in Nextcloud Office through craft-live; previously minor: document chat) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 Several people edit one presentation at the same time, each in their own DeckCraft, and see each
 other's selections, carets and edits as they happen: DeckCraft's equivalent of PowerPoint's
@@ -49,6 +49,76 @@ and for viewers (`role: view`), the presentation is read-only.
 Undo and Redo, while in a session, undo **your** changes only; others' edits never enter your
 undo history. Saving works as usual: each person saves their own copy.
 
+## In Nextcloud (craft-live)
+
+[craft-live](https://github.com/sirmmo/craft-live) is a WOPI editor that Nextcloud Office uses in
+place of Collabora. It opens presentations in DeckCraft's **web build**, live: everyone who opens a
+`.pptx` in Nextcloud's Files edits the same presentation in their browser, and the desktop app
+joins the same rooms through craft-live's nextcloud-live add-in. The web build speaks craft-live's
+embed contract (craft-live's `docs/design.md` §9) natively; there are no add-ins in the browser.
+
+**Using it.** Click a presentation in Nextcloud. It opens in DeckCraft inside Nextcloud's page,
+with the people editing it as circles in the title bar, the session popover (the room, who's
+there) and the Chat pane, as in any live session. The first person to open the file loads it
+into the room; the next ones see "Joining…" (read-only) until it's there. Save (⌘S, the quick
+access toolbar, File › Save) saves into Nextcloud now; craft-live also saves on its own (after
+200 edits, 30 s without one, at least every 5 min, and soon after the last editor stops), as a
+new version of the same file. **Close** at the right end of the title bar (or the popover's
+Close, or File › Close) goes back to Nextcloud's Files. People with view-only access see the
+presentation read-only (they chat). If the connection drops, editing goes on and the
+presentation merges when it's back (it reconnects after 1 s, then up to every 30 s); an expired
+session says to open the file again.
+
+**How it works** (`deckcraft_engine::live`, the browser side in `apps/deckcraft-web/src/live.rs`):
+
+- **Configuration.** craft-live loads `index.html#craft-live=1&ws=…&room=…&token=…&user=…&role=…&seed=…&file=…&name=…&format=…&api=…&lang=…`
+  (form-encoded, in the fragment so the token never reaches a server log). The app posts
+  `craft-live:hello` to the shell around it (same origin) as soon as it runs and accepts
+  `craft-live:config` with the same values; messages from anyone but the parent on the same
+  origin are ignored.
+- **The room** is the engine's ordinary co-editing room, served in memory under the transport id
+  `craft-live` (the popover says "through craft-live"). Its `collab/sync1|sync2|update|awareness`
+  messages are the y-websocket frames one to one (lib0 framing, protocol 2 Appendix B), on
+  `<ws>?token=<token>` with binary frames: `0/0` sync step 1, `0/1` sync step 2, `0/2` update,
+  `1` awareness, `2/0` permission denied, `3` query awareness (ignored: awareness renews every
+  15 s) and `100` craft-live's control messages (JSON). Every committed command is one update,
+  as on the desktop; the room's `user` is Nextcloud's person (`{id, name, color}`), which also
+  signs the chat.
+- **Seeding** (`seed=1`): `GET <file>` with `Authorization: Bearer <token>`, opened as File ›
+  Open does (a 0-byte file is a new presentation), then `collab.join` mode `share`: the room is
+  built in one transaction. **Joining** (`seed=0`): mode `join`, read-only "Joining…" until the
+  first sync step 2. The placeholder shown while loading is closed.
+- **Connecting:** `hello {clientId, can: ["upload"], client}` at once; the room's sync step 1 and
+  everything after it wait for `welcome`. A seeder whose `welcome` has neither `seed` nor
+  `seeded` (the lease went to someone else) never sends its copy: it leaves, asks again
+  (`POST <api>/prepare`) and seeds or joins as answered. `reseed` (the seeder left early) does
+  the same.
+- **Control messages:** `welcome`; `peers` (the room's people for the popover, and
+  `craft-live:peers` with yourself `self: true`); `save {id, mode: "upload", url, name, format}`:
+  the presentation's bytes in `format` (`pptx`, `pptm`, `potx`, `potm`, `ppsx`, `ppsm` as asked;
+  anything else, `.odp`, as a `.pptx` under a `.pptx` name, which craft-live keeps as a copy
+  beside the file), `PUT <url>` with the bearer token and `X-Craft-File-Name` (percent-encoded),
+  without blocking editing; a failed upload, or `mode: "webdav"`, answers `saveResult {id, ok:
+  false, error}`; `saved` / `saveFailed` / `modified` / `seeded` (the shell's
+  `craft-live:modified`, and `craft-live:saved` after a save the person asked for: Save sends
+  `saveNow`, Nextcloud's `Action_Save` arrives as `craft-live:save`); `notice` (status bar for
+  info, a toast for warnings and errors); `expired`.
+- **Close codes:** 4401 (expired) and 4403 (refused, with the permission-denied reason) end the
+  session with a message; anything else reconnects with backoff (1 s doubling to 30 s), says
+  `hello` and sync step 1 again, and both sides' edits merge.
+- **To the shell:** `craft-live:loaded` once the presentation is shown (seeded, or joined),
+  `modified`, `saved`, `peers`, `close` (Close, File › Close, the popover's Close) and `error`
+  (the file couldn't be loaded or read, before it was shown). `craft-live:close` from the shell
+  (Nextcloud closes the editor) leaves the room; `craft-live:getPeers` answers with the peers;
+  `craft-live:host` messages are ignored.
+- **Desktop:** `collab/snapshot {room, file: true, format}` answers in `format` when DeckCraft
+  writes it (`.pptx` otherwise), with `name` and `format` in the answer, so nextcloud-live saves a
+  `.pptm` or a `.potx` in its own format.
+
+DeckCraft doesn't read or write `.odp`: craft-live lists `.odp` for DeckCraft, and opening one
+says "DeckCraft can't open …" (`craft-live:error`). `lang` isn't used yet (DeckCraft's interface
+is English). Building the web build for craft-live: [packaging/web/README.md](../packaging/web/README.md#craft-live-nextcloud-office).
+
 ## Commands
 
 | Command | Params | Does |
@@ -66,7 +136,7 @@ it (the plugin's id as `plugin`) when a button, menu item, plugin dialog or the 
 the command, keeping `result.link` as the room's invitation. Programmatic calls never open
 dialogs or windows.
 
-Rust API (for embedders, tests and a future web build): `Session::collab_poll(now_ms)` runs the
+Rust API (for embedders, tests and the web build): `Session::collab_poll(now_ms)` runs the
 sessions between frames; `Session::collab_serve_in_memory(id)` / `collab_join_in_memory`,
 `collab_take_outgoing` and `collab_poll_pushed` connect a session to a transport the caller
 implements; `collab_take_notices` gives the status-bar messages. The core, without the engine, is
@@ -168,6 +238,20 @@ other files by id (immutable).
   loopback transport (`CRAFT_COLLAB_LOOPBACK` = the built plugin).
 - `crates/ui-egui/src/collab_tests.rs`: the Share button, its state in a session, the people's
   circles and "+N", going to a person's selection, the popover's Leave, the Share window.
+- craft-live: `crates/engine/src/live_tests.rs` (the frames byte for byte and hostile ones,
+  the fragment, the save format, and clients against a fake room that behaves as craft-live's:
+  seeding with a joiner held at "Joining…", one update per command and awareness both ways, the
+  upload's URL, headers and bytes, `.odp` saved as a `.pptx`, failed and WebDAV saves answered
+  with `saveResult`, the shell's messages, `expired` and 4401, reconnecting with backoff and
+  merging offline edits, 4403, `reseed` and a lost lease going through `prepare`, viewers, Close
+  and File › Close, errors before the presentation shows, hostile frames, the desktop's snapshot
+  `format`); `crates/engine/tests/live_wasm.rs` (seeding, joining, an edit, the chat and an
+  upload in wasm32 under `wasm-bindgen-test-runner`); `crates/ui-egui/src/collab_tests.rs`
+  (Save and Close going to the page, the popover's Close). Checked end to end against the real
+  craft-live server and its fake Nextcloud with the client run natively (seeding, joining,
+  editing, a viewer, Save and `Action_Save` writing new versions of the file, `.pptm` kept,
+  `.odp` refused, Close, reconnecting); a real browser in a real Nextcloud is still to try (list
+  in [gaps.md](gaps.md)).
 - Chat: `crates/engine/tests/chat.rs` (the commands and their limits, not undo steps but
   modifying, `.pptx`/`.pptm`/`.deckcraft` round trips; in sessions: sharing seeds and joining
   brings the chat, concurrent chatting by two and three people converging in one order, replies,
@@ -250,7 +334,8 @@ and the button).
 - Masters, layouts and the theme are shared as whole JSON values: two people editing the same
   master at once keep the later. Tables (their cells' text) and charts are whole values inside
   their shape's `kind`; SmartArt's outline is one value (`diagram`).
-- The web build has no add-ins; it will speak the y-websocket binding natively.
+- The web build has no add-ins and joins only craft-live's rooms (Nextcloud); a plain
+  y-websocket server or an MQTT broker isn't reachable from it yet.
 - yrs garbage collection is off (GridCraft's fuzzer crashed with it and the undo manager):
   deleted content stays in the document's history.
 - A text position in a table cell or in a cell being edited isn't sent to others (only the
@@ -260,5 +345,6 @@ and the button).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | major | The web build is a craft-live editor (Nextcloud Office): the embed contract (fragment, hello/config, the shell's messages), y-websocket with lib0 framing and craft-live's control messages, seeding and joining, uploads in the file's format, reconnecting, Close in the title bar, Save to Nextcloud; the desktop's `collab/snapshot` takes a `format` hint |
 | 2026-10-16 | minor | Document chat (craft-collab's chat.md 1.0, protocol 2.1): the `chat` and `chatMeta` roots, the file part, `chat.*` commands and `view.chat`, the Chat pane and the title bar's chat button with the unread count, mentions, typing in awareness; tests and the chat transcripts |
 | 2026-10-15 | major | Created: plugin protocol 2 (2.0.1) in DeckCraft: push channel, rooms, schema 1 (texts as Yjs text with formatting attributes, ids that are the model's), encryption, per-user undo, awareness with remote selections and carets, recovery; Share and the people in the title bar |

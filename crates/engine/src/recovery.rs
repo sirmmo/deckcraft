@@ -44,10 +44,19 @@ pub fn instance_id() -> u64 {
     *ID.get_or_init(|| {
         use std::hash::{BuildHasher, Hasher};
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u32(std::process::id());
+        // The browser has no process ids (`std::process::id` panics there) and no system clock:
+        // its random numbers and clock instead.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            h.write_u128(d.as_nanos());
+        {
+            h.write_u32(std::process::id());
+            if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                h.write_u128(d.as_nanos());
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            h.write_u64(js_sys::Date::now().to_bits());
+            h.write_u64(js_sys::Math::random().to_bits());
         }
         // Never 0: old entries are numbered from 1.
         ((h.finish() & UID_MASK) & !0xFF_FFFF).max(1 << 24)

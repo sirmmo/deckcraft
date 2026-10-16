@@ -113,3 +113,36 @@ fn share_opens_the_share_window_with_the_transports() {
     h.run_steps(3);
     assert!(h.state().collab.share.is_some());
 }
+
+#[test]
+fn embedded_in_craft_live_save_and_close_go_to_the_page_around_the_app() {
+    let mut h = harness(Session::with_new());
+    assert!(h.query_by_label("Close").is_none(), "no Close button outside an embedding page");
+    h.state_mut().embed = Some(crate::Embed { host: "Nextcloud".into(), ..Default::default() });
+    h.run_steps(2);
+    // Save (Cmd+S, the quick access toolbar, File › Save) asks the page to save.
+    h.state_mut().save();
+    assert!(h.state().embed.as_ref().unwrap().save_requested);
+    // The title bar's Close.
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().embed.as_ref().unwrap().close_requested);
+    h.state_mut().embed.as_mut().unwrap().close_requested = false;
+    // In the room, the session popover's Close (in place of Leave) closes the editor too, and
+    // doesn't leave the room by itself.
+    h.state_mut().session.collab_serve_in_memory(deckcraft_engine::live::TRANSPORT);
+    h.state_mut()
+        .session
+        .execute("collab.join", &json!({"plugin": deckcraft_engine::live::TRANSPORT, "room": "nc:cloud:42", "mode": "share", "user": {"id": "ann", "name": "Ann Lee", "color": "#3B7DD8"}}))
+        .unwrap();
+    h.run_steps(2);
+    h.get_by_label("Connecting…").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Leave").is_none());
+    let closes = h.get_all_by_label("Close").count();
+    assert_eq!(closes, 2, "the title bar's and the popover's");
+    h.get_all_by_label("Close").last().unwrap().click();
+    h.run_steps(2);
+    assert!(h.state().embed.as_ref().unwrap().close_requested);
+    assert!(h.state().session.active_room().is_some(), "the host leaves the room as it closes");
+}

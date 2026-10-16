@@ -526,6 +526,22 @@ pub struct SlideApp {
     next_file_id: u64,
     /// Picks and drops whose bytes have not arrived yet.
     pending_files: Vec<PendingFile>,
+    /// The page around the app when it's embedded (craft-live in Nextcloud Office): Save and
+    /// Close go to it. `None` in the desktop app and the plain web build.
+    pub embed: Option<Embed>,
+}
+
+/// An embedding page that keeps the file (craft-live, for Nextcloud Office): Save asks it to
+/// save, and a Close button in the title bar (and the session popover's Close, in place of
+/// Leave) asks it to close the editor. The host takes the requests each frame.
+#[derive(Clone, Debug, Default)]
+pub struct Embed {
+    /// Who keeps the file, for the buttons' tips ("Nextcloud").
+    pub host: String,
+    /// The person pressed Save.
+    pub save_requested: bool,
+    /// The person pressed Close.
+    pub close_requested: bool,
 }
 
 fn grid_options_touched(p: &Value) -> bool {
@@ -597,6 +613,7 @@ impl SlideApp {
             twisting: false,
             next_file_id: 1,
             pending_files: Vec::new(),
+            embed: None,
         }
     }
 
@@ -1334,6 +1351,11 @@ impl SlideApp {
     }
 
     pub fn save(&mut self) {
+        // Embedded (craft-live): the page around the app keeps the file; it saves the room now.
+        if let Some(e) = self.embed.as_mut() {
+            e.save_requested = true;
+            return;
+        }
         if self.session.active().and_then(|d| d.path.clone()).is_some() {
             match self.session.execute("file.save", &json!({})) {
                 Ok(_) => self.set_status("Saved"),

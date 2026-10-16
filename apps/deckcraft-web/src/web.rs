@@ -38,6 +38,12 @@ pub fn start() {
                     }
                     let inbox: Inbox = Inbox::default();
                     let mut app = SlideApp::new(Session::new(), services(inbox.clone(), cc.egui_ctx.clone()));
+                    // Inside craft-live (Nextcloud Office): the room's presentation, live.
+                    if let Some(config) = crate::live::detect() {
+                        crate::live::LiveShell::prepare(&mut app);
+                        let live = crate::live::LiveShell::new(config, cc.egui_ctx.clone());
+                        return Ok(Box::new(WebShell { app, inbox, live: Some(live) }));
+                    }
                     let q = query();
                     if !q.contains("blank") {
                         if let Err(e) = deckcraft_engine::sample::open_sample(&mut app.session) {
@@ -49,7 +55,7 @@ pub fn start() {
                     if q.contains("show") {
                         app.start_show(0, false);
                     }
-                    Ok(Box::new(WebShell { app, inbox }))
+                    Ok(Box::new(WebShell { app, inbox, live: None }))
                 }),
             )
             .await;
@@ -71,6 +77,8 @@ fn query() -> String {
 struct WebShell {
     app: SlideApp,
     inbox: Inbox,
+    /// craft-live mode (`#craft-live=1&…`): the room, the shell, Save and Close.
+    live: Option<crate::live::LiveShell>,
 }
 
 impl eframe::App for WebShell {
@@ -96,6 +104,9 @@ impl eframe::App for WebShell {
                     }
                 }
             });
+        }
+        if let Some(live) = self.live.as_mut() {
+            live.tick(&mut self.app);
         }
         self.app.logic(ctx);
     }
