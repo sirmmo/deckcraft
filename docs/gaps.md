@@ -1,6 +1,6 @@
 # Where DeckCraft falls short of PowerPoint
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (Office.js: what Microsoft's samples need; previously minor: add-ins that require other add-ins, manifest 1.3; previously minor: live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2: dialogs, opening files, document events; previously minor: ribbon buttons that run macros, saved as `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-16 · **Change:** minor (live co-editing: document chat; previously minor: Office.js: what Microsoft's samples need; previously minor: add-ins that require other add-ins, manifest 1.3; previously minor: live co-editing, plugin protocol 2; previously minor: add-in protocol 1.2: dialogs, opening files, document events; previously minor: ribbon buttons that run macros, saved as `customUI14.xml`; Record Macro, a DeckCraft extra; previously major: add-ins, Office add-ins and VBA macros through an add-in; macro-enabled and template packages; previously major: community PR wave 2026-10-14: soak tests, PPTX corpus, comment threads (#70), embedded fonts, SmartArt Text Pane, Animation Pane timeline, Hunspell spelling, thesaurus, AutoCorrect, 14 new dialogs, pen pressure and trackpad gestures; duplicated entries and headers folded; previous: minor, 3-D bevel, camera and face lighting rendered) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every known shortfall, one entry each, ranked by how much it stops someone who presents with
 PowerPoint from switching. This is the work list: pick from the top. Numbers are summarized in
@@ -368,8 +368,9 @@ Detail in [localization-parity.md](localization-parity.md).
 - **Live co-editing: first version.** Several people edit one presentation at once through a
   transport add-in (craft-collab's MQTT or loopback), each in their own DeckCraft: Share and the
   people's circles in the title bar, others' selections and carets on the slide, typing merged
-  character by character, per-person undo, end-to-end encryption, recovery
-  ([collab.md](collab.md)). Missing: masters, layouts, themes, tables' cells and charts merge as
+  character by character, per-person undo, end-to-end encryption, recovery, and a document chat
+  saved in the file (the Chat pane, unread count and mentions; [collab.md](collab.md#chat)).
+  Missing: masters, layouts, themes, tables' cells and charts merge as
   whole values (the later edit wins); the web build doesn't speak y-websocket yet; comments
   threads aren't live. 8–16 h.
 
@@ -383,6 +384,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | minor | Live co-editing entry: document chat (saved in the file, live in a session) |
 | 2026-10-15 | minor | Add-ins entry: Office.js closes the gaps Microsoft's samples hit (office.js blocking, ExecuteFunction, colour names, tags, `insertSlidesFromBase64`, coercions, `goToByIdAsync`, selection events); the missing list updated |
 | 2026-10-15 | minor | Add-ins entry: manifest 1.3 (add-ins require other add-ins: version ranges, blocked add-ins with reasons, start order, Install Missing from the newest release in range; Office add-ins' requirement sets checked) |
 | 2026-10-15 | minor | Live co-editing (plugin protocol 2): new Ecosystem entry; the add-ins entry mentions it |

@@ -760,6 +760,7 @@ pub fn export(p: &Presentation, kind: crate::PptxKind) -> Result<Vec<u8>, PptxEr
         x.pkg.xml_part(crate::custom_ui::PART_CUSTOM_UI14, "application/xml", crate::custom_ui::write(r).into_bytes());
         root.add_new(crate::custom_ui::REL_CUSTOM_UI14, crate::custom_ui::PART_CUSTOM_UI14, false);
     }
+    crate::chat::write(p, &mut x.pkg, &mut root);
     x.pkg.rels("", &root);
     x.pkg.finish()
 }

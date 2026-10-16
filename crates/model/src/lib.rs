@@ -11,6 +11,7 @@ pub mod anim;
 pub mod b64;
 pub mod bidi;
 pub mod chart;
+pub mod chat;
 pub mod defaults;
 pub mod edit;
 pub mod numfmt;
@@ -1024,6 +1025,9 @@ pub struct Presentation {
     /// none, or a richer customisation kept unchanged in [`Self::kept_parts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ribbon: Option<Ribbon>,
+    /// The document's chat ([`chat`]): not part of undo, saved with the file.
+    #[serde(default, skip_serializing_if = "chat::is_empty")]
+    pub chat: Arc<chat::Chat>,
 }
 
 /// A part a VBA project relates to (`vbaProjectSignature.bin`, `vbaData.xml`…), kept verbatim.

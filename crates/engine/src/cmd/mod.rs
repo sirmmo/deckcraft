@@ -198,6 +198,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(media::specs());
         v.extend(plugins::specs());
         v.extend(crate::collab::specs());
+        v.extend(crate::chat::specs());
         v.extend(office::specs());
         v.extend(developer::specs());
         v.extend(artistic::specs());

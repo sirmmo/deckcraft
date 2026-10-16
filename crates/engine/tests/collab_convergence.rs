@@ -2,8 +2,8 @@
 //! concurrently on one shared presentation, their updates delivered in random order and
 //! sometimes twice, and must end with identical presentations (the same shared content, schema
 //! 1), equal to what a newcomer joining afterwards builds. Typing in the same text boxes, moving,
-//! grouping and deleting shapes, adding, moving and deleting slides, and per-user Undo and Redo are
-//! part of the mix.
+//! grouping and deleting shapes, adding, moving and deleting slides, per-user Undo and Redo, and
+//! chatting (sending, replying, editing, deleting, clearing) are part of the mix.
 //!
 //! The sessions are connected in memory ([`collab::IN_MEMORY`]): the test is the transport.
 //!
@@ -61,6 +61,14 @@ fn text_shapes(s: &Session) -> Vec<(u64, Vec<usize>)> {
         .unwrap_or_default()
 }
 
+/// The chat's message ids (only this person's own, not deleted, when `own`).
+fn chat_ids(s: &Session, own: bool) -> Vec<String> {
+    let me = s.active_room().map(|r| r.user.id.clone()).unwrap_or_default();
+    s.doc()
+        .map(|d| d.doc.chat.messages.iter().filter(|m| !own || (m.author.id == me && !m.deleted)).map(|m| m.id.clone()).collect())
+        .unwrap_or_default()
+}
+
 fn slides(s: &Session) -> usize {
     s.doc().map(|d| d.doc.slides.len()).unwrap_or(0)
 }
@@ -70,7 +78,7 @@ fn generate(rng: &mut Rng, s: &Session, tag: &str) -> Vec<(String, Json)> {
     let n = slides(s);
     let ids = shapes(s);
     let one = |rng: &mut Rng| if ids.is_empty() { json!([]) } else { json!([ids[rng.below(ids.len())]]) };
-    let v = match rng.below(30) {
+    let v = match rng.below(36) {
         0 => vec![("slide.new", json!({"layout": rng.pick(&["blank", "titleAndContent", "title"]), "at": rng.below(n + 1)}))],
         1 if n > 1 => vec![("slide.delete", json!({"index": rng.below(n)}))],
         2 if n > 1 => vec![("slide.move", json!({"from": rng.below(n), "to": rng.below(n)}))],
@@ -120,6 +128,27 @@ fn generate(rng: &mut Rng, s: &Session, tag: &str) -> Vec<(String, Json)> {
         23 => vec![("transition.set", json!({"kind": rng.pick(&["fade", "push", "none"])}))],
         24..=26 => vec![("edit.undo", json!({}))],
         27 => vec![("edit.redo", json!({}))],
+        // Chatting: messages sent, replied to, edited and deleted by their authors, the chat
+        // cleared now and then.
+        30..=32 => {
+            let last = chat_ids(s, false).last().cloned();
+            let mut p = json!({"text": format!("{tag}hello @Ann 😀")});
+            if rng.chance(30)
+                && let Some(id) = last
+            {
+                p["replyTo"] = json!(id);
+            }
+            vec![("chat.send", p)]
+        }
+        33 => match chat_ids(s, true).first() {
+            Some(id) => vec![("chat.edit", json!({"id": id, "text": format!("{tag}edited")}))],
+            None => vec![],
+        },
+        34 => match chat_ids(s, true).last() {
+            Some(id) => vec![("chat.delete", json!({"id": id}))],
+            None => vec![],
+        },
+        35 if rng.chance(25) => vec![("chat.clear", json!({}))],
         _ => vec![("edit.select", json!({"ids": one(rng)}))],
     };
     v.into_iter().map(|(id, p)| (id.to_string(), p)).collect()

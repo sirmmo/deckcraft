@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 pub mod awareness;
+mod chat;
 pub mod crypto;
 pub mod json;
 mod replica;

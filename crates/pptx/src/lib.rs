@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod cfb;
+pub mod chat;
 mod custgeom;
 pub mod custom_ui;
 mod dgm;

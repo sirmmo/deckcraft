@@ -204,12 +204,12 @@ fn body_props(b: &TextBody) -> JsonMap<String, Json> {
 
 /// The presentation-wide part: everything but slides, masters, media and the id counter.
 fn shell(p: &Presentation) -> Presentation {
-    Presentation { slides: vec![], masters: vec![], media: vec![], next_id: 0, ..p.clone() }
+    Presentation { slides: vec![], masters: vec![], media: vec![], next_id: 0, chat: Default::default(), ..p.clone() }
 }
 
 fn pres_props(p: &Presentation) -> JsonMap<String, Json> {
     let mut o = object(serde_json::to_value(shell(p)).unwrap_or(Json::Null));
-    for k in ["slides", "masters", "media", "nextId"] {
+    for k in ["slides", "masters", "media", "nextId", "chat"] {
         o.remove(k);
     }
     o.insert(MASTERS.into(), Json::Array(p.masters.iter().map(|m| Json::from(id_str(m.id.0))).collect()));
@@ -419,6 +419,8 @@ pub struct Refreshed {
     pub changed: Vec<(u32, Vec<u32>)>,
     /// Slides were added, removed or moved, or presentation-wide settings changed.
     pub structural: bool,
+    /// The chat changed (others sent, edited, deleted or cleared).
+    pub chat: bool,
 }
 
 #[derive(Default, Debug)]
@@ -434,12 +436,13 @@ struct Changes {
     masters: bool,
     media: bool,
     meta: bool,
+    chat: bool,
     slides: HashMap<u32, SlideChanges>,
 }
 
 impl Changes {
     fn any(&self) -> bool {
-        self.list || self.pres || self.masters || self.media || !self.slides.is_empty()
+        self.list || self.pres || self.masters || self.media || self.chat || !self.slides.is_empty()
     }
 }
 
@@ -487,6 +490,21 @@ impl Replica {
         let theme = doc.get_or_insert_map(THEME);
         let media = doc.get_or_insert_map(MEDIA);
         let meta = doc.get_or_insert_map(META);
+        // The chat: observed, but never in the undo scope (Undo never removes a message).
+        let chat = doc.get_or_insert_array(crate::chat::CHAT);
+        let chat_meta = doc.get_or_insert_map(crate::chat::CHAT_META);
+        let ch = changes.clone();
+        chat.observe_deep("deckcraft/chat", move |txn, _| {
+            if recorded(txn) {
+                lock(&ch).chat = true;
+            }
+        });
+        let ch = changes.clone();
+        chat_meta.observe("deckcraft/chatMeta", move |txn, _| {
+            if recorded(txn) {
+                lock(&ch).chat = true;
+            }
+        });
         let ch = changes.clone();
         slides.observe("deckcraft/slides", move |txn, _| {
             if recorded(txn) {
@@ -667,6 +685,22 @@ impl Replica {
         self.take_outbox()
     }
 
+    /// Shares only the chat's change (a viewer chats; their other edits never leave). Returns the
+    /// update to send.
+    pub fn commit_chat(&mut self, chat: &Arc<deckcraft_model::chat::Chat>) -> Result<Option<Vec<u8>>, CollabError> {
+        let Some(base) = self.base.clone() else { return Err(CollabError::NotReady) };
+        if Arc::ptr_eq(&base.chat, chat) {
+            return Ok(None);
+        }
+        let doc = self.doc.clone();
+        {
+            let mut txn = doc.transact_mut_with(LOCAL);
+            crate::chat::write(&mut txn, Some(&base.chat), chat);
+        }
+        self.base = Some(Arc::new(Presentation { chat: chat.clone(), ..(*base).clone() }));
+        self.take_outbox()
+    }
+
     // ------------------------------------------------------------ remote changes
 
     /// Applies a remote update (sync step 2 or an incremental update) to the shared document.
@@ -749,7 +783,7 @@ impl Replica {
                 self.observe_slide(s.id.0);
             }
             self.base = Some(Arc::new(p.clone()));
-            return Ok(Some(Refreshed { doc: p, changed: vec![], structural: true }));
+            return Ok(Some(Refreshed { doc: p, changed: vec![], structural: true, chat: true }));
         }
         let ch = std::mem::take(&mut *lock(&self.changes));
         if ch.meta {
@@ -776,6 +810,7 @@ impl Replica {
             if ch.media {
                 p.media = read_media(&txn);
             }
+            p.chat = if ch.chat { Arc::new(crate::chat::read(&txn)) } else { cur.chat.clone() };
             let by_id: HashMap<u32, Arc<Slide>> = cur.slides.iter().map(|s| (s.id.0, s.clone())).collect();
             let order: Vec<u32> = if ch.list {
                 let arr = txn.get_array(SLIDES);
@@ -809,7 +844,7 @@ impl Replica {
             reseed_ids(&mut p, &mut self.rng);
         }
         self.base = Some(Arc::new(p.clone()));
-        Ok(Some(Refreshed { doc: p, changed, structural: ch.list || ch.pres || ch.masters }))
+        Ok(Some(Refreshed { doc: p, changed, structural: ch.list || ch.pres || ch.masters, chat: ch.chat }))
     }
 
     // ------------------------------------------------------------ undo
@@ -977,6 +1012,7 @@ fn write_all(txn: &mut TransactionMut, old: Option<&Presentation>, new: &Present
     write_masters(txn, old, new);
     write_media(txn, old, new);
     write_slides(txn, old, new);
+    crate::chat::write(txn, old.map(|o| &o.chat), &new.chat);
 }
 
 fn write_pres(txn: &mut TransactionMut, old: Option<&Presentation>, new: &Presentation) {
@@ -1217,7 +1253,7 @@ fn diff_shape(txn: &mut TransactionMut, m: &MapRef, old: &Shape, new: &Shape) {
 
 /// The presentation-wide part (slides, masters and media empty).
 fn read_shell<R: ReadTxn>(txn: &R) -> Presentation {
-    let obj = txn.get_map(PRES).map(|m| json_entries(&m, txn, &[MASTERS, "slides", "media", "nextId"])).unwrap_or_default();
+    let obj = txn.get_map(PRES).map(|m| json_entries(&m, txn, &[MASTERS, "slides", "media", "nextId", "chat"])).unwrap_or_default();
     let mut p: Presentation = lenient(obj);
     p.slides.clear();
     p.masters.clear();
@@ -1362,6 +1398,7 @@ fn read_all<R: ReadTxn>(txn: &R, cur: &Arc<Presentation>) -> Presentation {
             p.slides.push(Arc::new(s));
         }
     }
+    p.chat = Arc::new(crate::chat::read(txn));
     p.next_id = 0;
     p.fix_next_id();
     p

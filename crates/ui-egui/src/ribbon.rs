@@ -81,13 +81,15 @@ pub fn title_bar(app: &mut SlideApp, ui: &mut Ui) {
         // Right side.
         let mut right = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(Rect::from_min_max(pos2(rect.max.x - 560.0, rect.min.y), pos2(rect.max.x - 10.0, rect.max.y)))
+                .max_rect(Rect::from_min_max(pos2(rect.max.x - 620.0, rect.min.y), pos2(rect.max.x - 10.0, rect.max.y)))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         right.spacing_mut().item_spacing.x = 6.0;
         // Share at the right end, the people in the live session beside it.
         if has_doc {
             crate::collab_ui::title_bar(app, &mut right, control_h);
+            // The chat button with its unread count, beside the people.
+            crate::chat_ui::title_button(app, &mut right, control_h);
             right.add_space(6.0);
         }
         if icon_toggle(&mut right, Icon::Search, "Search commands (⇧⌘P)", true, false).clicked() {
@@ -2252,6 +2254,14 @@ fn view(app: &mut SlideApp, ui: &mut Ui) {
         let n = app.ui.notes;
         if big_button_ex(ui, Icon::Notes, "Notes", true, false, n).0.clicked() {
             app.ui.notes = !n;
+        }
+        let chat_on = app.ui.pane.as_deref() == Some("chat");
+        if big_button_ex(ui, Icon::CommentsBubble, "Chat", true, false, chat_on)
+            .0
+            .on_hover_text("Chat with the people editing this presentation")
+            .clicked()
+        {
+            let _ = app.run("view.chat", json!({}));
         }
     });
     group(ui, |ui| {

@@ -119,6 +119,8 @@ pub struct Peer {
     pub selection: Option<(usize, Vec<ShapeId>)>,
     /// Where they're editing text.
     pub text: Option<TextAt>,
+    /// They're typing in the chat (awareness `typing: true`).
+    pub typing: bool,
 }
 
 /// One shared presentation.
@@ -188,7 +190,8 @@ impl Room {
                     Some((slide, shapes, text)) => (Some((slide, shapes.into_iter().map(ShapeId).collect())), text),
                     None => (None, None),
                 };
-                Some(Peer { client_id: id, user, selection, text })
+                let typing = st.get("typing").and_then(Json::as_bool) == Some(true);
+                Some(Peer { client_id: id, user, selection, text, typing })
             })
             .collect()
     }
@@ -233,6 +236,9 @@ pub struct Collab {
     in_process: Vec<String>,
     /// Answers to their requests (`collab/snapshot`), for [`Session::collab_take_outgoing`].
     answers: Vec<Json>,
+    /// The presentation (uid) whose chat this person is typing in (`chat.typing`): awareness says
+    /// `typing: true` there.
+    pub chat_typing: Option<u64>,
 }
 
 impl Collab {
@@ -274,7 +280,8 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-fn user_from_prefs(s: &mut Session) -> User {
+/// This person as the preferences say (a stable random id is made the first time).
+pub(crate) fn user_from_prefs(s: &mut Session) -> User {
     if s.prefs.collab_user_id.is_empty() {
         let mut b = [0u8; 8];
         let v = if deckcraft_collab::random_bytes(&mut b).is_ok() { u64::from_le_bytes(b) } else { deckcraft_collab::new_client_id() };
@@ -702,7 +709,15 @@ fn flush(s: &mut Session, r: &mut Room) {
         return;
     }
     if r.view_only || r.joining {
-        // A viewer's edits never leave: back to the room's state.
+        // A viewer chats; their other edits never leave: back to the room's state.
+        if r.view_only && !r.joining && r.replica.base().is_some_and(|b| !Arc::ptr_eq(&b.chat, &d.doc.chat)) {
+            let chat = d.doc.chat.clone();
+            match r.replica.commit_chat(&chat) {
+                Ok(Some(update)) => send_update(r, "collab/update", &update),
+                Ok(None) => {}
+                Err(e) => log::warn!("collab {}: {e}", r.room),
+            }
+        }
         if let Some(b) = r.replica.base() {
             d.doc = b.clone();
             d.revision += 1;
@@ -784,7 +799,8 @@ fn apply_refreshed(s: &mut Session, uid: u64, out: deckcraft_collab::Refreshed, 
     let p = Arc::new(out.doc);
     let dirty = d.is_dirty();
     d.doc = p.clone();
-    if !dirty && out.changed.is_empty() && !out.structural {
+    // Others' chat makes the presentation modified: it has to be saved for the chat to be kept.
+    if !dirty && out.changed.is_empty() && !out.structural && !out.chat {
         d.saved_doc = p.clone();
     }
     d.revision += 1;
@@ -1013,6 +1029,11 @@ fn send_awareness(s: &mut Session, force: bool) {
         }
         let Some(d) = s.docs.iter().find(|d| d.uid == r.doc) else { continue };
         let mut state = json!({"user": r.user});
+        if s.collab.chat_typing == Some(r.doc)
+            && let Some(o) = state.as_object_mut()
+        {
+            o.insert("typing".into(), json!(true));
+        }
         if d.selection.target == Target::Slides
             && let Some(slide) = d.current_slide()
         {

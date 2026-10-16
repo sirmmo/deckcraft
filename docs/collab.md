@@ -1,6 +1,6 @@
 # Live sessions (co-editing)
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (created: plugin protocol 2 in DeckCraft, schema 1, Share in the title bar) · **Target:** Microsoft PowerPoint (Microsoft 365)
+> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (document chat: the Chat pane, saved in the file, live in a session; previously major: created: plugin protocol 2 in DeckCraft, schema 1, Share in the title bar) · **Target:** Microsoft PowerPoint (Microsoft 365)
 
 Several people edit one presentation at the same time, each in their own DeckCraft, and see each
 other's selections, carets and edits as they happen: DeckCraft's equivalent of PowerPoint's
@@ -58,6 +58,7 @@ undo history. Saving works as usual: each person saves their own copy.
 | `collab.leave` | `{room?}` | Leaves (default: the active presentation's room) |
 | `collab.status` | `{}` | `{rooms: [{room, plugin, state, peers, listed, role, encrypted, clientId, user, title, document, message, link, canUndo, canRedo}], transports, user}` |
 | `collab.setUser` | `{name?, color?}` | Your name (the author name comments carry) and colour (`#RRGGBB`) |
+| `chat.list`, `chat.send`, `chat.edit`, `chat.delete`, `chat.clear`, `chat.export`, `chat.typing`, `view.chat` | | The document chat ([below](#chat)) |
 
 A plugin command's result may carry `collab: {join: {…}}` (with protocol 1.2's `open`, `dialog`
 and `message`): `plugins.run` returns it to the caller, and the interface runs `collab.join` with
@@ -167,6 +168,82 @@ other files by id (immutable).
   loopback transport (`CRAFT_COLLAB_LOOPBACK` = the built plugin).
 - `crates/ui-egui/src/collab_tests.rs`: the Share button, its state in a session, the people's
   circles and "+N", going to a person's selection, the popover's Leave, the Share window.
+- Chat: `crates/engine/tests/chat.rs` (the commands and their limits, not undo steps but
+  modifying, `.pptx`/`.pptm`/`.deckcraft` round trips; in sessions: sharing seeds and joining
+  brings the chat, concurrent chatting by two and three people converging in one order, replies,
+  edits, deletions, clearing with messages sent meanwhile, Undo never removing a message, viewers
+  chatting, typing in awareness, an encrypted room carrying ciphertext); chatting in the
+  convergence fuzz (`collab_convergence.rs`); craft-collab's `deckcraft-1-chat` and
+  `deckcraft-1-chat-share` transcripts in `collab_conformance.rs` (with `chat`, `typing`,
+  `chatDecodesTo` lines, `fails` and variables in `run` params); `crates/pptx/tests/chat.rs` (the
+  part); `deckcraft_model::chat` tests (validation, the 10,000 limit); `crates/ui-egui/src/chat_tests.rs`
+  (the button and its unread count, the mention flash, the pane, Enter and Shift+Enter, "Message
+  deleted", the menu's Office note, Clear chat… asking first, typing in a session).
+
+## Chat
+
+The people editing a presentation talk in a chat beside it: craft-collab's
+[document chat](https://github.com/sirmmo/craft-collab/blob/main/docs/chat.md) (protocol 2.1),
+the same in GridCraft and WordCraft. The chat belongs to the presentation: it's shared live
+through the room, saved in the file, and stays there until someone clears it. Outside a live
+session it works too, as notes left in the file.
+
+**Using it.** The title bar's chat button (a speech bubble, to the left of the people's circles)
+opens the **Chat** pane on the right; it's there in a session, and outside one when the
+presentation has a chat. View › Chat opens it too. The button counts others' messages that
+arrived while the pane was closed (a red badge), and flashes when one of them mentions you
+(`@Your Name`, or your first name). In the pane each message shows its author's circle (initials
+on their colour), name in their colour, time (relative today: "just now", "5 min ago", "3 h ago";
+else the local date and time), the text (selectable; links clickable; `@Name` highlighted when it
+names someone in the session or the chat), the message it replies to quoted, and "edited" or
+"Message deleted". **Reply** under a message answers it; **Edit** and **Delete** are under your own.
+The box at the bottom sends with Enter (Shift+Enter for a new line; Escape stops replying or
+editing). Above the messages: "Name is typing…" while others type in the chat. The **⋯** menu has
+Export as text and Export as JSON (copied to the clipboard), **Clear chat…** (it asks: "Remove the
+whole chat from the document for everyone?") and the note "Kept in the file; Office drops it when
+it saves". While joining, the box waits for the room's document; viewers (`role: view`) chat too.
+
+**Commands** (everything is a command; programmatic calls never ask):
+
+| Command | Params | Does |
+|---|---|---|
+| `chat.list` | `{since?, limit?}` | `{messages: [{id, author: {id, name, color}, at, text?, replyTo?, edited?, deleted?}], clearedAt?, count}`, newest last: those after the message `since` names (a number: sent after that time in ms), the newest `limit` of them; `count` is the chat's size |
+| `chat.send` | `{text, replyTo?}` | `{id}` (8 random characters of `0-9a-z`). Text of 1–4,000 UTF-16 units; at 10,000 messages "The chat is full: clear it to go on" |
+| `chat.edit` | `{id, text}` | The author only (their id is compared), not a deleted message |
+| `chat.delete` | `{id}` | The author only: "Message deleted" stays so replies still point somewhere |
+| `chat.clear` | `{}` | `{removed}`: every message goes, for everyone in a session |
+| `chat.export` | `{format?: text\|json}` | `{format, text}`: `[2026-10-16 14:03 UTC] Name: text` lines, or the file part's JSON |
+| `chat.typing` | `{typing}` | Your awareness says `typing: true` (the pane sends it while its box has the focus and text) |
+| `view.chat` | `{on?}` | Shows or hides the pane (interface) |
+
+The author is the room's `user` in a session, else you as `collab.setUser` and the preferences
+say (a stable random id, your name and colour). Chat changes aren't undo steps (Undo never
+removes a message, in a session or not) but they make the presentation modified: it has to be
+saved for the chat to be kept. Others' messages make it modified too.
+
+**In the shared document**: the root array `chat` (each message a map `{id, author, at, text,
+replyTo?, edited?, deleted?}`, `author` the JSON text of `{id, name, color}`) and the root map
+`chatMeta` (`clearedAt`). Messages are only appended, and read in the array's order (the same on
+every peer whatever the senders' clocks say); an edit or a deletion sets keys on the author's
+entry; clearing removes every entry in one transaction and sets `clearedAt`. Neither root is in
+the undo manager's scope. A reader skips entries that aren't maps or have a malformed `id`,
+`author`, `at` or `text`, and repeated ids, and keeps the first 10,000 left. **Sharing** seeds the
+room's chat from the presentation's; **joining** brings the room's chat in (the joined presentation
+starts unmodified); in an encrypted room the chat travels encrypted like every update. Awareness
+may carry `typing: true`.
+
+**In the file**: `.pptx`/`.pptm`/`.potx`… hold the part `/craft/chat.json` (content type
+`application/vnd.craft.chat+json`, related from the package root's `_rels/.rels` with
+`urn:craft:relationships:chat`): `{"version": 1, "clearedAt"?, "messages": [...]}`, the messages
+as `chat.list` gives them. An empty chat writes no part; a malformed part is ignored with a
+warning, never stopping the file from opening. The native `.deckcraft` stores the same JSON as
+`chat` in `presentation.json`. PowerPoint drops the part when it saves; the chat then lives on only
+in copies the craft apps saved.
+
+Core: `deckcraft_model::chat` (the model and its validation, shared by the file, the native
+format and the room), `crates/collab/src/chat.rs` (the Yjs mapping), `crates/pptx/src/chat.rs`
+(the part), `crates/engine/src/chat.rs` (the commands), `crates/ui-egui/src/chat_ui.rs` (the pane
+and the button).
 
 ## Not yet
 
@@ -183,4 +260,5 @@ other files by id (immutable).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | minor | Document chat (craft-collab's chat.md 1.0, protocol 2.1): the `chat` and `chatMeta` roots, the file part, `chat.*` commands and `view.chat`, the Chat pane and the title bar's chat button with the unread count, mentions, typing in awareness; tests and the chat transcripts |
 | 2026-10-15 | major | Created: plugin protocol 2 (2.0.1) in DeckCraft: push channel, rooms, schema 1 (texts as Yjs text with formatting attributes, ids that are the model's), encryption, per-user undo, awareness with remote selections and carets, recovery; Share and the people in the title bar |

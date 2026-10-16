@@ -10,6 +10,7 @@ pub mod addins;
 pub mod animtimeline;
 pub mod backstage;
 pub mod canvas;
+pub mod chat_ui;
 pub mod collab_ui;
 pub mod control;
 pub mod credits;
@@ -375,7 +376,8 @@ pub const UI_COMMANDS: &[(&str, &str, Option<&str>, &str)] = &[
     ("view.zoom", "Set Zoom", None, "{percent}"),
     ("view.zoomDialog", "Zoom…", None, "{}"),
     ("view.fit", "Fit to Window", None, "{}"),
-    ("view.pane", "Task Pane", None, "{pane: format|animation|selection|comments|designer|background|smartart|null}"),
+    ("view.pane", "Task Pane", None, "{pane: format|animation|selection|comments|designer|background|smartart|chat|null}"),
+    ("view.chat", "Chat", None, "{on?: bool}: shows or hides the document chat"),
     ("review.thesaurusPane", "Thesaurus", Some("Shift+F7"), "{word?}: open the Thesaurus pane on the selected word"),
     ("view.tab", "Ribbon Tab", None, "{tab}"),
     ("view.collapseRibbon", "Collapse the Ribbon", Some("Cmd+F1"), "{}"),
@@ -503,6 +505,8 @@ pub struct SlideApp {
     pub addins: addins::State,
     /// Live sessions: the Share window and the session popover ([`collab_ui`]).
     pub collab: collab_ui::State,
+    /// The document chat: the Chat pane's box, what was seen, the mention flash ([`chat_ui`]).
+    pub chat: chat_ui::State,
     /// Office add-ins' task panes.
     pub office: office_pane::Panes,
     /// View › New Window: a second window on one presentation. `None` when it is closed.
@@ -583,6 +587,7 @@ impl SlideApp {
             selpane: selpane::State::default(),
             addins: addins::State::default(),
             collab: collab_ui::State::default(),
+            chat: chat_ui::State::default(),
             office: office_pane::Panes::default(),
             doc_window: None,
             sorter: sorter::State::default(),
@@ -952,6 +957,7 @@ impl SlideApp {
                 self.thesaurus_query = word;
                 self.ui.pane = Some("thesaurus".into());
             }
+            "view.chat" => chat_ui::toggle(self, p.get("on").and_then(Value::as_bool)),
             "view.pane" => {
                 let pane = p.get("pane").and_then(Value::as_str).map(String::from);
                 self.ui.pane =
@@ -1855,6 +1861,7 @@ impl SlideApp {
         let t = theme::Tokens::get(&ctx);
         self.tick_media(&ctx);
         collab_ui::pump(self, &ctx);
+        chat_ui::tick(self, &ctx);
         office_pane::pump(self);
         eyedropper::tick(self, &ctx);
         self.opening_ui(&ctx);
@@ -2092,6 +2099,8 @@ fn js_now() -> f64 {
 mod animpane_tests;
 #[cfg(test)]
 mod browsetheme_tests;
+#[cfg(test)]
+mod chat_tests;
 #[cfg(test)]
 mod collab_tests;
 #[cfg(test)]

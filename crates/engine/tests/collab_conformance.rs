@@ -3,8 +3,9 @@
 //! the engine. The test stands in for the transport `org.craft.conformance`: `run` lines are
 //! engine commands, `in` lines go to the session's collab inbox, `out` lines are matched against
 //! what the session sent, `model` lines against the presentation, `notice` lines against the
-//! status-bar messages, and `decodesTo` against what another peer would build from every update
-//! so far.
+//! status-bar messages, `chat` and `typing` lines against the document chat and who the room shows
+//! typing, and `decodesTo` / `chatDecodesTo` against what another peer would build from every
+//! update so far. The chat transcripts (`deckcraft-1-chat*`) replay the same way.
 //!
 //! The transcripts live in the craft-collab repository: `CRAFT_COLLAB_DIR`, or a checkout next to
 //! this one (`../craft-collab-deckcraft`, then `../craft-collab`). Without one the test says so
@@ -43,14 +44,15 @@ fn transcripts() -> Option<Vec<PathBuf>> {
     None
 }
 
-/// Pattern matching of `out` lines: `$any`, `$b64`, `$int`, `$absent`, `$clientId`.
+/// Pattern matching of `out`, `chat` and `chatDecodesTo` lines: `$any`, `$b64`, `$int`,
+/// `$absent`, and variables (`$clientId`, `$mine1`…: bound to the first value met, equal after).
 fn matches(pat: &Json, v: Option<&Json>, vars: &mut BTreeMap<String, Json>) -> bool {
     match pat {
         Json::String(p) if p == "$absent" => v.is_none(),
         Json::String(p) if p == "$any" => v.is_some(),
         Json::String(p) if p == "$b64" => v.and_then(Json::as_str).is_some_and(|s| b64_decode(s).is_ok()),
         Json::String(p) if p == "$int" => v.is_some_and(|v| v.is_i64() || v.is_u64()),
-        Json::String(p) if p == "$clientId" => match (vars.get(p), v) {
+        Json::String(p) if p.starts_with('$') => match (vars.get(p), v) {
             (Some(bound), Some(v)) => bound == v,
             (None, Some(v)) => {
                 vars.insert(p.clone(), v.clone());
@@ -93,6 +95,28 @@ fn model_of(title: &str, p: Option<&Presentation>) -> Json {
         })
         .unwrap_or_default();
     json!({"title": title, "slides": slides})
+}
+
+/// `run` params with bound variables (`"$mine1"`) replaced by their values.
+fn substitute(v: &Json, vars: &BTreeMap<String, Json>) -> Json {
+    match v {
+        Json::String(s) if s.starts_with('$') => vars.get(s).cloned().unwrap_or_else(|| v.clone()),
+        Json::Array(a) => Json::Array(a.iter().map(|x| substitute(x, vars)).collect()),
+        Json::Object(o) => Json::Object(o.iter().map(|(k, x)| (k.clone(), substitute(x, vars))).collect()),
+        _ => v.clone(),
+    }
+}
+
+/// The chat another peer reads from `updates` (already decrypted).
+fn decoded_chat(updates: &[Vec<u8>]) -> Json {
+    let mut r = Replica::new(77);
+    for u in updates {
+        let _ = r.apply_update(u);
+    }
+    match r.refresh(&Arc::new(Presentation::default())) {
+        Ok(Some(out)) => out.doc.chat.to_json(),
+        _ => json!({"messages": []}),
+    }
 }
 
 /// What another peer builds from `updates` (already decrypted).
@@ -187,12 +211,18 @@ fn replay(path: &PathBuf) -> Result<(), String> {
         match l["t"].as_str().unwrap_or("") {
             "run" => {
                 let cmd = l["command"].as_str().unwrap_or("");
-                let params = l["params"].clone();
+                let params = substitute(&l["params"], &r.vars);
                 if cmd == "collab.join" {
                     r.room = params["room"].as_str().unwrap_or("").to_string();
                     r.key = params.get("key").and_then(Json::as_str).and_then(|k| Key::from_base64(k).ok());
                 }
-                r.s.execute(cmd, &params).map_err(|e| format!("line {n}: {cmd}: {e}"))?;
+                if l.get("fails").and_then(Json::as_bool) == Some(true) {
+                    if r.s.execute(cmd, &params).is_ok() {
+                        return Err(format!("line {n}: {cmd} {params} should have been refused"));
+                    }
+                } else {
+                    r.s.execute(cmd, &params).map_err(|e| format!("line {n}: {cmd}: {e}"))?;
+                }
                 r.collect();
             }
             "in" => {
@@ -230,6 +260,12 @@ fn replay(path: &PathBuf) -> Result<(), String> {
                 match found {
                     Some(i) => {
                         r.pending.drain(..=i);
+                        if let Some(want) = l.get("chatDecodesTo") {
+                            let got = decoded_chat(&r.updates);
+                            if !matches(want, Some(&got), &mut r.vars) {
+                                return Err(format!("line {n}: a peer would see the chat\n{got}\nnot\n{want}"));
+                            }
+                        }
                         if let Some(want) = l.get("decodesTo") {
                             let got = decoded(&r.updates);
                             if !same(&got, want) {
@@ -251,6 +287,23 @@ fn replay(path: &PathBuf) -> Result<(), String> {
                 let got = r.model();
                 if !same(&got, &l["model"]) {
                     return Err(format!("line {n}: model\n{got}\nnot\n{}", l["model"]));
+                }
+            }
+            "chat" => {
+                let got = r.s.doc().map(|d| d.doc.chat.to_json()).unwrap_or(Json::Null);
+                if !matches(&l["chat"], Some(&got), &mut r.vars) {
+                    return Err(format!("line {n}: chat\n{got}\nnot\n{}", l["chat"]));
+                }
+            }
+            "typing" => {
+                let mut want: Vec<String> =
+                    l["names"].as_array().map(|a| a.iter().filter_map(Json::as_str).map(str::to_string).collect()).unwrap_or_default();
+                want.sort();
+                let mut got: Vec<String> =
+                    r.s.active_room().map(|room| room.peers().into_iter().filter(|p| p.typing).map(|p| p.user.name).collect()).unwrap_or_default();
+                got.sort();
+                if got != want {
+                    return Err(format!("line {n}: typing {got:?}, not {want:?}"));
                 }
             }
             "notice" => {

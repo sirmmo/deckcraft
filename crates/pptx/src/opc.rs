@@ -336,7 +336,7 @@ pub struct RelsOut {
 impl RelsOut {
     /// Add (or reuse) a relationship; `kind` is a full type URI or a suffix of the standard base.
     pub fn add(&mut self, kind: &str, target: &str, external: bool) -> String {
-        let ty = if kind.starts_with("http") { kind.to_string() } else { format!("{RT_BASE}{kind}") };
+        let ty = if kind.starts_with("http") || kind.starts_with("urn:") { kind.to_string() } else { format!("{RT_BASE}{kind}") };
         if let Some((id, ..)) = self.items.iter().find(|(_, t, tg, e)| *t == ty && tg == target && *e == external) {
             return id.clone();
         }
@@ -346,7 +346,7 @@ impl RelsOut {
     }
     /// Always add a new relationship even if an identical one exists.
     pub fn add_new(&mut self, kind: &str, target: &str, external: bool) -> String {
-        let ty = if kind.starts_with("http") { kind.to_string() } else { format!("{RT_BASE}{kind}") };
+        let ty = if kind.starts_with("http") || kind.starts_with("urn:") { kind.to_string() } else { format!("{RT_BASE}{kind}") };
         let id = format!("rId{}", self.items.len() + 1);
         self.items.push((id.clone(), ty, target.to_string(), external));
         id

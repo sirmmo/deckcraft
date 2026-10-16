@@ -697,6 +697,7 @@ pub fn import(bytes: &[u8]) -> Result<Presentation, PptxError> {
     crate::vba::read(&pkg, &pres_part.rels, &mut p);
     let modelled = crate::custom_ui::read(&pkg, &mut p);
     p.kept_parts = kept_parts(&pkg, &pres_path, &modelled);
+    crate::chat::read(&pkg, &root_rels, &mut p);
 
     inherit_placeholder_geometry(&mut p);
     default_text_anchor(&mut p);

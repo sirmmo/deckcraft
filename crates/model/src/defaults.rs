@@ -520,6 +520,7 @@ pub fn blank_presentation(size: Size, theme: Theme, title_slide: bool) -> Presen
         vba_project: None,
         vba_parts: vec![],
         ribbon: None,
+        chat: Default::default(),
     };
     if title_slide {
         // A fresh deck starts at id 256 and this builds a handful of ids, so the slide always
