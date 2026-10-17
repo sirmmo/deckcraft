@@ -131,6 +131,12 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 | Date | What landed |
 |---|---|
+| 2026-10-15 | CLI: .txt and .md export includes table cell text, which it used to skip silently (#814) |
+| 2026-10-15 | PDF export and rendering: `anchorCtr` centres the drawn text block — right-aligned text no longer ran past the box edge (#736) |
+| 2026-10-14 | connected MCP rejects unrelated, malformed, incomplete and oversized replies without replay; buffered unsolicited bytes force a fresh connection before sending (#718) |
+| 2026-10-14 | Empty bulleted and numbered paragraphs show gray markers while editing, including on first click and after Enter. Markers use the list style and stay out of slide shows and exports. |
+| 2026-10-13 | Interface font fallback continues to eligible installed faces when the first covering face is colour or exceeds the 48 MiB limit; document fallback order and the CJK/IME rendering assertions are retained (#101) |
+| 2026-10-13 | PDFW2: adopt the shared writer with native unwind recovery and explicit font-embedding failures; preserve app-owned export behavior and keep reader dependencies out of production |
 | 2026-10-13 | Eyedropper: Shape Fill, Shape Outline, Font Color and every other colour menu end with an Eyedropper that takes the colour drawn at a point of the slide (hover shows it, a click applies it, Esc cancels); `slide.colorAt` gives the same from scripts and MCP (#367) |
 | 2026-10-13 | Slide show: Honeycomb's hexagons cover the whole slide again — the bottom quarter stayed black until the endpoint (#420) |
 | 2026-10-13 | Copy and Cut from the ribbon, the slide's right-click menu and the menus put the text on the system clipboard, as Ctrl+C and Ctrl+X do (#431) |
@@ -235,6 +241,9 @@ app's JSON control channel (`deckcraft --control PORT`).
 | 2026-10-15 | minor | Progress log: live co-editing (plugin protocol 2) |
 | 2026-10-15 | trivial | Progress log: add-in protocol 1.2 |
 | 2026-10-14 | minor | Progress log: add-ins, Office add-ins and VBA; Ecosystem re-scored |
+| 2026-10-14 | trivial | remote MCP checks reply IDs, envelopes and bounded newline framing (#718) |
+| 2026-10-14 | minor | Gray list markers on empty paragraphs while editing; caret keeps the list indent before typing |
+| 2026-10-14 | minor | Community PR wave folded: headline breadth 84% over 191 features (P0 92%, P1 82%, P2 55%) and the feature-area breadths from `cargo xtask parity`; one row per area; Upcoming item 2 merged; per-PR count notes dropped from the progress log. Ready stays ~55%, stage alpha |
 | 2026-10-13 | trivial | Progress log: Eyedropper in the colour menus, slide.colorAt (#367) |
 | 2026-10-13 | trivial | Progress log: video seek frame-loss race and regression coverage |
 | 2026-10-14 | minor | Presenter keyboard navigation and end-screen controls |

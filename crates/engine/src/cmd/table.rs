@@ -288,9 +288,9 @@ fn rows_cols(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
     with_table(s, p, "table", move |t| {
         match op.as_str() {
             "rowAbove" => t.insert_row(r),
-            "rowBelow" => t.insert_row(r + 1),
+            "rowBelow" => t.insert_row(r.saturating_add(1)),
             "colLeft" => t.insert_col(c),
-            "colRight" => t.insert_col(c + 1),
+            "colRight" => t.insert_col(c.saturating_add(1)),
             "delRow" => {
                 if !t.delete_row(r) {
                     return Err(bad("table.deleteRow", "can't delete the last row"));

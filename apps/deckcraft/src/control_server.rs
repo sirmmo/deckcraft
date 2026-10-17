@@ -151,10 +151,23 @@ fn serve(stream: TcpStream, tx: &SyncSender<ControlRequest>, ctx: &egui::Context
                 let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                 let params = msg.get("params").cloned().unwrap_or(json!({}));
                 let (req, rrx) = ControlRequest::new(method, params);
+                let state = Arc::clone(&req.state);
                 let mut r = match tx.try_send(req) {
                     Ok(()) => {
                         ctx.request_repaint();
-                        rrx.recv_timeout(limits.reply_timeout).unwrap_or_else(|_| json!({"ok": false, "error": "timeout"}))
+                        match rrx.recv_timeout(limits.reply_timeout) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                // Give up on the request. While it was still queued this makes
+                                // sure it never runs late (#719); if the app had already taken
+                                // it, its outcome is unknown rather than a definite failure.
+                                if ControlRequest::abandon(&state) {
+                                    json!({"ok": false, "error": "timeout"})
+                                } else {
+                                    json!({"ok": false, "error": "timeout: the app had already started the request, so it may still run; its outcome is unknown"})
+                                }
+                            }
+                        }
                     }
                     Err(TrySendError::Full(_)) => json!({"ok": false, "error": "busy: too many queued requests"}),
                     Err(TrySendError::Disconnected(_)) => break,
@@ -295,5 +308,44 @@ mod tests {
         let a = reply(&mut ar).unwrap();
         assert_eq!(a["error"], "timeout");
         drop(rx);
+    }
+
+    /// A request that timed out while it was still queued must not run when the window resumes (#719).
+    #[test]
+    fn timed_out_request_does_not_run_when_the_window_resumes() {
+        let (addr, rx) = server(Limits { max_line: 512, ..small() });
+        let (mut r, mut w) = client(addr);
+        writeln!(w, r#"{{"id":1,"method":"engine.execute","params":{{"command":"slide.new"}}}}"#).unwrap();
+        let t = reply(&mut r).unwrap();
+        assert_eq!(t["error"], "timeout");
+        // The window resumes and drains the queue, exactly as `SlideApp::drain_control` does.
+        let mut app = deckcraft_ui_egui::SlideApp::new(deckcraft_engine::Session::with_new(), deckcraft_ui_egui::Services::default());
+        let ctx = egui::Context::default();
+        let before = app.session.active().unwrap().doc.slides.len();
+        let req = rx.try_recv().expect("the timed-out request is still queued");
+        if req.take() {
+            let _ = deckcraft_ui_egui::control::handle(&mut app, &ctx, &req);
+        }
+        assert_eq!(app.session.active().unwrap().doc.slides.len(), before, "a request that timed out must not run when the window resumes");
+        drop(rx);
+    }
+
+    /// A request the app had already started when the reply timed out reports an unknown outcome,
+    /// not a definite failure (#719).
+    #[test]
+    fn a_request_already_started_when_the_reply_times_out_reports_an_unknown_outcome() {
+        let (addr, rx) = server(small());
+        let ui = std::thread::spawn(move || {
+            let req = rx.recv().expect("the request is queued");
+            assert!(req.take(), "the app claims the request");
+            // Still running it when the sender's wait expires.
+            std::thread::sleep(Duration::from_millis(450));
+            let _ = req.reply.send(json!({"ok": true, "result": "ran"}));
+        });
+        let (mut r, mut w) = client(addr);
+        writeln!(w, r#"{{"id":1,"method":"m"}}"#).unwrap();
+        let v = reply(&mut r).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("outcome is unknown"), "{v}");
+        ui.join().unwrap();
     }
 }

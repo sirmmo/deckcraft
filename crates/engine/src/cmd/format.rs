@@ -1089,7 +1089,7 @@ fn columns(s: &mut Session, p: &Value) -> Result<Value> {
 }
 fn autofit(s: &mut Session, p: &Value) -> Result<Value> {
     let m = match str_param(p, "mode").unwrap_or("none") {
-        "shrink" => AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 },
+        "shrink" => AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 },
         "resize" | "shape" => AutoFit::Shape,
         _ => AutoFit::None,
     };

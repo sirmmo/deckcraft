@@ -222,6 +222,9 @@ pub struct RenderOpts<'a> {
     pub skip: &'a [ShapeId],
     /// Hide the text of this shape (the UI draws it while editing).
     pub skip_text: Option<ShapeId>,
+    /// Text being edited: replace its prompt with gray markers on empty list paragraphs.
+    /// Ignored outside editor rendering.
+    pub editing_text: Option<ShapeId>,
     /// Animated GIF pictures and how far into their play they are (seconds); others show frame 1.
     pub gif_times: &'a [(ShapeId, f64)],
     /// Worker threads (0 = this thread; required when effects use filters).
@@ -246,6 +249,7 @@ impl Default for RenderOpts<'_> {
             state: None,
             skip: &[],
             skip_text: None,
+            editing_text: None,
             gif_times: &[],
             threads: 0,
             offset: (0.0, 0.0),
@@ -921,7 +925,7 @@ impl Renderer {
             }
             ShapeKind::Table(t) => {
                 // Rows grow with their text: what the cells cover, borders included.
-                let cells = table::draw(ctx, f.pres, rctx, t, m, x.w, x.h, &f.fields);
+                let cells = table::draw(ctx, f.pres, rctx, t, m, x.w, x.h, &f.fields, f.opts.edit && f.opts.editing_text == Some(s.id));
                 self.track(m, cells.unwrap_or(Rect::new(0.0, 0.0, x.w, x.h)).inflate(2.0, 2.0));
             }
             ShapeKind::Chart(c) => {
@@ -1300,8 +1304,21 @@ impl Renderer {
                 &text_geo
             };
             let tr = geo.text_rect;
-            if !body.is_empty() {
-                let l = deckcraft_text::layout(rctx, s, body, &Opts { rect: tr, fields: &f.fields, prompt_color: None, no_shrink: false });
+            let editing = f.opts.edit && f.opts.editing_text == Some(s.id);
+            if !body.is_empty() || editing {
+                // Imported placeholders can have no paragraph until the first keystroke.
+                let mut empty;
+                let body = if editing && body.paragraphs.is_empty() {
+                    empty = body.clone();
+                    empty.paragraphs.push(Default::default());
+                    &empty
+                } else {
+                    body
+                };
+                let mut l = deckcraft_text::layout(rctx, s, body, &Opts { rect: tr, fields: &f.fields, prompt_color: None, no_shrink: false });
+                if editing {
+                    preview_empty_bullets(&mut l);
+                }
                 let tm = text_transform(m, tr, l.rotation);
                 for b in l.lines.iter().filter_map(line_bounds) {
                     // Glyphs reach a little past their carets and line box (italics, swashes).
@@ -2032,6 +2049,15 @@ pub(crate) fn glyph(face: &deckcraft_fonts::FontFace, gid: u32) -> Arc<BezPath> 
 pub fn draw_text(ctx: &mut RenderContext, rctx: &Ctx, s: &Shape, body: &TextBody, tr: Rect, m: Affine, fields: &dyn Fields, prompt: Option<Rgba>) {
     let l = deckcraft_text::layout(rctx, s, body, &Opts { rect: tr, fields, prompt_color: prompt, no_shrink: false });
     draw_layout(ctx, &l, tr, m);
+}
+
+/// Add transient list markers to an editor layout, using the document's own bullet glyphs.
+fn preview_empty_bullets(l: &mut deckcraft_text::TextLayout) {
+    for mut run in l.empty_bullets.drain(..) {
+        run.color = Rgba::rgb(0xB3, 0xB3, 0xB3);
+        run.alpha = 1.0;
+        l.runs.push(run);
+    }
 }
 
 /// Where text laid out in text rect `tr` is drawn, for a shape drawn with `m` (shape-local →

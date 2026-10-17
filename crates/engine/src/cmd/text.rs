@@ -119,9 +119,14 @@ pub(crate) fn edit_text<T>(s: &mut Session, f: impl FnOnce(&mut TextBody, &mut T
         let mut t = t0.clone();
         let body = body_mut(doc, sel, &t).ok_or_else(|| bad("text", "the text being edited is gone"))?;
         let r = f(body, &mut t);
-        // The saved shrink-on-overflow scale was for the old text: fit the new text afresh.
+        // The saved shrink-on-overflow scale was for the old text: fit the new text afresh. A
+        // body whose file carried no `fontScale` keeps none (100 %) here; `fit_shrink_scale`
+        // below fills in the computed scale when the new text overflows (#724).
         if let Some(AutoFit::Shrink { font_scale, line_reduction }) = &mut body.body.autofit {
-            (*font_scale, *line_reduction) = (1.0, 0.0);
+            if font_scale.is_some() {
+                *font_scale = Some(1.0);
+            }
+            *line_reduction = 0.0;
         }
         sel.text = Some(t);
         Ok(r)
@@ -132,8 +137,11 @@ pub(crate) fn edit_text<T>(s: &mut Session, f: impl FnOnce(&mut TextBody, &mut T
     Ok(r)
 }
 
-/// Grow/shrink an auto-sizing text box (Resize shape to fit text) to its text.
+/// Refit a shape after its text changed: remember the shrink-on-overflow scale the layout
+/// computes (#724), then grow/shrink an auto-sizing text box (Resize shape to fit text) to its
+/// text.
 pub fn fit_text_box(s: &mut Session, id: ShapeId) -> Result<()> {
+    fit_shrink_scale(s, id)?;
     let st = s.doc()?;
     let Some(sh) = st.shape(id).cloned() else { return Ok(()) };
     let Some(body) = sh.text.clone() else { return Ok(()) };
@@ -168,6 +176,53 @@ pub fn fit_text_box(s: &mut Session, id: ShapeId) -> Result<()> {
     }
     st.doc = Arc::new(d);
     st.revision += 1;
+    Ok(())
+}
+
+/// Store the shrink-on-overflow scale the layout computes for `id`, so a save keeps
+/// `fontScale`/`lnSpcReduction` in step with what DeckCraft draws (#724). Runs after a text
+/// change: a body with no meaningful saved scale — a file's bare `<a:normAutofit/>` (`None`) or
+/// the reset an edit leaves (`1.0`, no reduction) — is fitted afresh; a scale the file saved is
+/// left as it is, as PowerPoint draws it.
+fn fit_shrink_scale(s: &mut Session, id: ShapeId) -> Result<()> {
+    let st = s.doc()?;
+    let Some(sh) = st.shape(id).cloned() else { return Ok(()) };
+    let Some(body) = sh.text.clone() else { return Ok(()) };
+    let Some(AutoFit::Shrink { font_scale, line_reduction }) = body.body.autofit else { return Ok(()) };
+    if !(font_scale.is_none() || (font_scale == Some(1.0) && line_reduction == 0.0)) {
+        return Ok(());
+    }
+    let doc = st.doc.clone();
+    let sel = st.selection.clone();
+    let Some(ctx) = ctx_for(&doc, &sel) else { return Ok(()) };
+    let x = xfrm_of(&doc, &sel, &sh);
+    let tr = deckcraft_render::shape_geometry(&sh, x.w, x.h).text_rect;
+    // Lay out as if the scale had just been reset, so the fit is computed even for `None` (which
+    // is drawn at 100 % and only fitted again when its text changes).
+    let mut probe = body.clone();
+    probe.body.autofit = Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 });
+    let opts = deckcraft_text::Opts { rect: tr, fields: &deckcraft_text::NoFields, prompt_color: None, no_shrink: false };
+    let l = deckcraft_text::layout(&ctx, &sh, &probe, &opts);
+    if l.font_scale >= 1.0 && l.line_reduction <= 0.0 {
+        return Ok(());
+    }
+    // Change the body in place without an extra undo step (it is part of the edit).
+    let st = s.doc_mut()?;
+    let mut d = (*st.doc).clone();
+    let stored = if let Some(list) = crate::shapes_mut(&mut d, &st.selection)
+        && let Some(target) = deckcraft_model::find_shape_mut(list, id)
+        && let Some(t) = target.text.as_mut()
+        && let Some(AutoFit::Shrink { font_scale, line_reduction }) = &mut t.body.autofit
+    {
+        (*font_scale, *line_reduction) = (Some(l.font_scale), l.line_reduction);
+        true
+    } else {
+        false
+    };
+    if stored {
+        st.doc = Arc::new(d);
+        st.revision += 1;
+    }
     Ok(())
 }
 

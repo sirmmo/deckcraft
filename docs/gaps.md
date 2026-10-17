@@ -400,6 +400,8 @@ Detail in [localization-parity.md](localization-parity.md).
 | 2026-10-15 | minor | Add-in protocol 1.2 (dialogs, opening files, document events) |
 | 2026-10-15 | minor | Ribbon buttons that run macros (`customUI14.xml` read and written) and Record Macro: the ribbon-buttons and `customUI` gap closed |
 | 2026-10-14 | minor | Add-ins, Office add-ins and VBA macros through an add-in (the owner reversed "out of scope"); `.pptm`/`.potm`/`.ppsm` and template/show content types: that gap narrowed to opening behaviour |
+| 2026-10-14 | trivial | Fixed #718: remote MCP no longer accepts unrelated or buffered stale success; loopback regressions cover invalid envelopes, incomplete and oversized frames |
+| 2026-10-14 | minor | Community PR wave folded: one entry each for the soak tests (engine and UI), the PPTX corpus (seven owned corpus files), edit points / text warp / 3-D, proofing (Hunspell spelling, thesaurus, AutoCorrect), the smaller missing rows, dialogs (41 vs ~60; Print and Insert Object left) and pen/trackpad input; ranked rows 3, 4 and 10 de-duplicated (comment threads #70 and the pane timeline are done); the fixed command-palette entry (#79) removed |
 | 2026-10-13 | minor | EMF/WMF rectangle clip regions (`INTERSECTCLIPRECT`, `EXCLUDECLIPRECT`, `EXTSELECTCLIPRGN`) limit later drawing. EMF+ records remain |
 | 2026-10-13 | minor | Embedded fonts are read, written and drawn (TrueType, OpenType, Embedded OpenType). The gap is now MicroType Express subsets, which are kept but not drawn |
 | 2026-10-13 | minor | WordArt Transform gallery: Shape Format ▸ Text Effects lists the 40 presets and No Transform; `format.textWarp` applies one (adjust handles still open) |

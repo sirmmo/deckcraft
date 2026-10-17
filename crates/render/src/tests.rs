@@ -2509,3 +2509,62 @@ fn single_series_column_chart_varies_colours_by_point() {
     };
     assert_ne!(render(true), render(false));
 }
+
+/// A 1024×1024 PNG of 2 px wide black and white vertical stripes.
+fn fine_stripes_png() -> Vec<u8> {
+    let img =
+        image::RgbaImage::from_fn(1024, 1024, |x, _| if (x / 2) % 2 == 0 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) });
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img).write_to(&mut out, image::ImageFormat::Png).expect("png");
+    out.into_inner()
+}
+
+#[test]
+fn a_cropped_picture_is_decoded_at_the_resolution_of_the_whole_image() {
+    // The top-left sixteenth of the image in a 64 pt box: 64 image pixels over 64 output pixels.
+    // Decoding at the box's size instead of the whole image's blurs the stripes to grey (#762).
+    let mut p = Presentation::default();
+    let media = p.add_media("stripes.png", "image/png", fine_stripes_png()).expect("media");
+    let fill = deckcraft_model::style::PictureFill { media, crop: [0.0, 0.0, 15.0 / 16.0, 15.0 / 16.0], ..Default::default() };
+    let sh = Shape { id: ShapeId(600), xfrm: Some(Xfrm::new(100.0, 100.0, 64.0, 64.0)), kind: ShapeKind::Picture { fill }, ..Default::default() };
+    std::sync::Arc::make_mut(&mut p.slides[0]).shapes = vec![sh];
+    let img = render_slide(&p, 0, &RenderOpts { scale: 1.0, ..Default::default() });
+    let (mut sharp, mut total) = (0, 0);
+    for y in 110..154 {
+        for x in 110..154 {
+            let v = img.pixel(x, y)[0];
+            total += 1;
+            if !(48..=208).contains(&v) {
+                sharp += 1;
+            }
+        }
+    }
+    assert!(sharp * 10 >= total * 9, "the stripes stay sharp: {sharp} of {total} pixels black or white");
+}
+
+#[test]
+fn empty_bullet_is_gray_only_while_editing_and_never_in_exports() {
+    use deckcraft_model::text::{Bullet, Paragraph};
+    let mut para = Paragraph::default();
+    para.props.bullet = Some(Bullet::Char { char: "•".into() });
+    para.props.margin_left = Some(24.0);
+    para.props.indent = Some(-24.0);
+    para.end_props.size = Some(32.0);
+    let sh = Shape {
+        id: ShapeId(901),
+        xfrm: Some(Xfrm::new(100.0, 100.0, 400.0, 120.0)),
+        text: Some(TextBody { paragraphs: vec![para], ..Default::default() }),
+        ..Default::default()
+    };
+    let p = deck_with(vec![sh]);
+    let render = |edit, editing_text| render_slide(&p, 0, &RenderOpts { edit, editing_text, ..Default::default() });
+    let plain = render(false, None);
+    assert_eq!(plain.pixels, render(true, None).pixels);
+    assert_eq!(plain.pixels, render(false, Some(ShapeId(901))).pixels, "export ignores editor markers");
+    assert_eq!(plain.pixels, render(true, Some(ShapeId(902))).pixels, "other shapes stay empty");
+    let editing = render(true, Some(ShapeId(901)));
+    let changed: Vec<_> = editing.pixels.as_chunks::<4>().0.iter().zip(plain.pixels.as_chunks::<4>().0).filter(|(a, b)| a != b).collect();
+    assert!(!changed.is_empty(), "an empty bullet must be visible");
+    assert!(changed.iter().any(|(px, _)| px[0] == 179 && px[1] == 179 && px[2] == 179));
+    assert!(changed.iter().all(|(px, _)| px[0] >= 179 && px[0] == px[1] && px[1] == px[2]));
+}

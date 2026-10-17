@@ -122,7 +122,7 @@ fn new(s: &mut Session, p: &Value) -> Result<Value> {
             sh.text = Some(TextBody::from_text(t));
         }
         if let Some(b) = str_param(p, "body")
-            && let Some(sh) = slide.shapes.iter_mut().find(|x| x.ph_type().is_some_and(|k| !k.is_title()))
+            && let Some(sh) = body_placeholder(&mut slide.shapes)
         {
             let mut body = TextBody::from_text(b);
             // Leading tabs set the outline level, as in text.set.
@@ -156,6 +156,25 @@ fn new(s: &mut Session, p: &Value) -> Result<Value> {
         sel.target = Target::Slides;
         Ok(json!({"index": at, "id": id}))
     })
+}
+
+/// The placeholder a new slide's `body` goes into: the layout's main content placeholder.
+/// Prefers `idx="1"` (the content slot PowerPoint fills), then a full-size text placeholder over
+/// a `half`/`quarter` one, then a text placeholder over a picture/chart/table one; ties keep
+/// shape order, so a layout with a single body placeholder behaves as before.
+fn body_placeholder(shapes: &mut [deckcraft_model::Shape]) -> Option<&mut deckcraft_model::Shape> {
+    use deckcraft_model::PhType;
+    let rank = |sh: &deckcraft_model::Shape| {
+        let ph = sh.ph.as_ref()?;
+        if ph.kind.is_title() {
+            return None;
+        }
+        let text = matches!(ph.kind, PhType::Body | PhType::Obj | PhType::SubTitle);
+        let small = matches!(ph.size.as_deref(), Some("half" | "quarter"));
+        Some((ph.idx != 1, small, !text))
+    };
+    let best = shapes.iter().enumerate().filter_map(|(i, sh)| rank(sh).map(|r| (r, i))).min()?.1;
+    shapes.get_mut(best)
 }
 
 fn index_of(s: &Session, p: &Value) -> Result<usize> {
@@ -199,6 +218,9 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
                 && let Some(sec) = doc.sections.get_mut(si)
             {
                 sec.slides.push(nid);
+                // Keep the section list in document order so the copy sits next to its source.
+                let order: Vec<SlideId> = doc.slides.iter().map(|x| x.id).collect();
+                sec.slides.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(usize::MAX));
             }
         }
         sel.slide = (last + new_ids.len()).min(doc.slides.len().saturating_sub(1));
@@ -614,6 +636,23 @@ mod tests {
     use serde_json::json;
 
     use crate::Session;
+
+    #[test]
+    fn duplicate_keeps_section_order_in_step_with_slides() {
+        let mut s = Session::with_new();
+        while s.doc().expect("doc").doc.slides.len() < 3 {
+            s.execute("slide.new", &json!({})).expect("new slide");
+        }
+        s.execute("section.add", &json!({"at": 0})).expect("section");
+        let orig = s.doc().expect("doc").doc.slides.first().expect("slide").id;
+        s.execute("slide.duplicate", &json!({"index": 0})).expect("dup");
+        let st = s.doc().expect("doc");
+        let all: Vec<_> = st.doc.slides.iter().map(|x| x.id).collect();
+        let sec = &st.doc.sections.first().expect("section").slides;
+        assert_eq!(all.len(), 4);
+        assert_eq!(sec, &all, "section order must match slide order");
+        assert_eq!(sec.first(), Some(&orig));
+    }
 
     #[test]
     fn new_slide_body_leading_tabs_become_levels() {

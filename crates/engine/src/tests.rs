@@ -122,13 +122,45 @@ fn editing_text_refits_a_saved_shrink() {
     s.edit(|doc, sel| {
         let shapes = crate::shapes_mut(doc, sel).unwrap();
         let sh = deckcraft_model::find_shape_mut(shapes, title).unwrap();
-        sh.text.as_mut().unwrap().body.autofit = Some(AutoFit::Shrink { font_scale: 0.5, line_reduction: 0.2 });
+        sh.text.as_mut().unwrap().body.autofit = Some(AutoFit::Shrink { font_scale: Some(0.5), line_reduction: 0.2 });
         Ok(())
     })
     .unwrap();
     s.execute("text.insert", &json!({"text": "!"})).unwrap();
     let sh = s.doc().unwrap().shape(title).cloned().unwrap();
-    assert_eq!(sh.text.unwrap().body.autofit, Some(AutoFit::Shrink { font_scale: 1.0, line_reduction: 0.0 }));
+    assert_eq!(sh.text.unwrap().body.autofit, Some(AutoFit::Shrink { font_scale: Some(1.0), line_reduction: 0.0 }));
+}
+
+/// After an edit, the shrink-on-overflow scale the layout computes is stored, so the saved file
+/// carries the scale DeckCraft draws instead of a bare normAutofit (#724).
+#[test]
+fn editing_shrink_text_stores_the_layout_scale() {
+    use deckcraft_model::text::AutoFit;
+    let mut s = session();
+    let r = s.execute("shape.insert", &json!({"preset": "rect", "rect": [80.0, 80.0, 200.0, 40.0]})).unwrap();
+    let id = deckcraft_model::ShapeId(r["id"].as_u64().unwrap() as u32);
+    s.execute("format.autofit", &json!({"mode": "shrink"})).unwrap();
+    let text = (0..12).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+    s.execute("text.set", &json!({"id": id.0, "text": text})).unwrap();
+    let sh = s.doc().unwrap().shape(id).cloned().unwrap();
+    let Some(AutoFit::Shrink { font_scale, line_reduction }) = sh.text.unwrap().body.autofit else { panic!("shrink") };
+    assert!(font_scale.is_some_and(|s| s < 1.0), "the computed fit is stored: {font_scale:?} / {line_reduction}");
+    // The saved file must carry the scale DeckCraft draws, so PowerPoint opens it the same way.
+    let bytes = deckcraft_pptx::export(&s.doc().unwrap().doc).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("ppt/slides/slide1.xml").unwrap(), &mut xml).unwrap();
+    let scales: Vec<i64> = xml.split("fontScale=\"").skip(1).filter_map(|s| s.split('"').next()?.parse().ok()).collect();
+    assert!(scales.iter().any(|v| *v < 100_000), "the fitted scale is saved: {scales:?}");
+    // Undo restores the state before the edit, and redo brings the stored fit back.
+    s.execute("edit.undo", &json!({})).unwrap();
+    let sh = s.doc().unwrap().shape(id).cloned().unwrap();
+    let Some(AutoFit::Shrink { font_scale, .. }) = sh.text.unwrap().body.autofit else { panic!("shrink") };
+    assert_eq!(font_scale, Some(1.0), "undo restores the scale the edit started from");
+    s.execute("edit.redo", &json!({})).unwrap();
+    let sh = s.doc().unwrap().shape(id).cloned().unwrap();
+    let Some(AutoFit::Shrink { font_scale, .. }) = sh.text.unwrap().body.autofit else { panic!("shrink") };
+    assert!(font_scale.is_some_and(|v| v < 1.0), "redo brings the stored fit back: {font_scale:?}");
 }
 
 #[test]
@@ -1440,6 +1472,41 @@ fn slide_ranges_parse_like_powerpoints_print_box() {
     assert!(cmd::file::pdf_bytes(&doc, &json!({"slides": "5"})).is_err());
     let opts = cmd::file::pdf_options(&json!({"slides": [0, 7, 1]}), 2).unwrap();
     assert_eq!(opts.slides, Some(vec![0, 1]), "indices past the end are dropped");
+}
+
+/// #725: a layout with a small body placeholder ahead of its content placeholder (as Keynote
+/// exports "Title & Bullets") still gets the body in the content placeholder (`idx="1"`).
+#[test]
+fn new_slide_body_goes_to_the_content_placeholder() {
+    for before in [true, false] {
+        let mut s = session();
+        let doc = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        let id = deckcraft_model::ShapeId(doc.alloc_id().expect("id"));
+        let lay = std::sync::Arc::make_mut(&mut doc.masters[0])
+            .layouts
+            .iter_mut()
+            .find(|l| l.kind == deckcraft_model::LayoutType::TitleAndContent)
+            .unwrap();
+        let at = lay.shapes.iter().position(|x| x.ph.as_ref().is_some_and(|p| p.idx == 1)).unwrap();
+        let mut small = lay.shapes[at].clone();
+        small.id = id;
+        small.name = "Subtitle 21".into();
+        let ph = small.ph.as_mut().unwrap();
+        ph.kind = deckcraft_model::PhType::Body;
+        ph.idx = 21;
+        ph.size = Some("quarter".into());
+        lay.shapes.insert(if before { at } else { at + 1 }, small);
+
+        s.execute("slide.new", &json!({"layout": "titleAndContent", "title": "T", "body": "Line one\nLine two"})).unwrap();
+        let doc = &s.doc().unwrap().doc;
+        let slide = &doc.slides[doc.slides.len() - 1];
+        let text = |idx: u32| {
+            let sh = slide.shapes.iter().find(|x| x.ph.as_ref().is_some_and(|p| p.idx == idx)).unwrap();
+            sh.text.as_ref().map(|t| t.text()).unwrap_or_default()
+        };
+        assert_eq!(text(1), "Line one\nLine two", "before = {before}");
+        assert_eq!(text(21), "", "before = {before}");
+    }
 }
 
 #[test]
@@ -3506,4 +3573,39 @@ fn an_exhausted_id_space_refuses_growth() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted.len(), ids.len(), "no id repeats");
+}
+
+#[test]
+fn shape_ids_beyond_u32_are_rejected_not_wrapped() {
+    let (mut s, a, b) = two_shapes();
+    let wrap = |id: deckcraft_model::ShapeId| u64::from(id.0) + (1u64 << 32);
+    let shapes_before = s.doc().unwrap().shapes().len();
+    let r = s.execute("shape.connect", &json!({"from": wrap(a), "to": wrap(b)}));
+    assert!(r.is_err(), "connect must reject ids beyond u32, got {r:?}");
+    let r = s.execute("shape.sites", &json!({"id": wrap(a)}));
+    assert!(r.is_err(), "sites must reject ids beyond u32, got {r:?}");
+    let r = s.execute("shape.points", &json!({"id": wrap(a)}));
+    assert!(r.is_err(), "points must reject ids beyond u32, got {r:?}");
+    let r = s.execute("shape.movePoint", &json!({"id": wrap(a), "index": 0, "x": 1.0, "y": 1.0}));
+    assert!(r.is_err_and(|e| e.to_string().contains("not a valid shape id")), "movePoint must reject ids beyond u32");
+    assert_eq!(s.doc().unwrap().shapes().len(), shapes_before, "no connector was created");
+    // In-range ids still work.
+    assert!(s.execute("shape.sites", &json!({"id": a.0})).is_ok());
+    assert!(s.execute("shape.connect", &json!({"from": a.0, "to": b.0})).is_ok());
+}
+
+#[test]
+fn table_insert_below_or_right_of_a_huge_index_appends_at_the_end() {
+    let mut s = session();
+    let id = table_at(&mut s, &[100.0, 100.0], json!([["a", "b"], ["c", "d"]]));
+    let r = s.execute("table.insertRowBelow", &json!({"id": id.0, "row": u64::MAX}));
+    assert!(r.is_ok(), "insertRowBelow must clamp a huge row, got {r:?}");
+    let t = table_of(&s, id);
+    assert_eq!(t.n_rows(), 3);
+    assert_eq!(t.cell(0, 0).unwrap().text.text(), "a", "the original rows keep their place");
+    let r = s.execute("table.insertColumnRight", &json!({"id": id.0, "col": u64::MAX}));
+    assert!(r.is_ok(), "insertColumnRight must clamp a huge col, got {r:?}");
+    let t = table_of(&s, id);
+    assert_eq!(t.n_cols(), 3);
+    assert_eq!(t.cell(0, 1).unwrap().text.text(), "b", "the original columns keep their place");
 }
